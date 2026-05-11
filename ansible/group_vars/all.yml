@@ -10,11 +10,27 @@
 # ---------------------------------------------------------------------------
 # Credentials & SSH
 # ---------------------------------------------------------------------------
+# The expected flow is:
+#   1. `piclusterctl setup-keys` distributes ~/.ssh/id_ed25519.pub to every
+#      host (using the SSH password once).
+#   2. Subsequent Ansible runs use that key - no SSH password needed.
+#
+# `ansible_become_password` is still required so sudo works during plays
+# (Raspberry Pi OS users do not have NOPASSWD by default).
 ansible_user: eachan
-ansible_password: w00dhill
 ansible_become: true
 ansible_become_method: sudo
 ansible_become_password: w00dhill
+
+# If you really need password-based SSH auth (e.g. you can't distribute keys),
+# set this and ensure `sshpass` is installed. Leave commented to force key auth.
+# ansible_password: w00dhill
+
+# ---------------------------------------------------------------------------
+# Named hosts (used by templates / roles instead of hard-coding inventory)
+# ---------------------------------------------------------------------------
+supervisor_host: supervisor
+ai_host: ai
 
 # ---------------------------------------------------------------------------
 # Project paths

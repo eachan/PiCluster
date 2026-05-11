@@ -55,22 +55,38 @@ This installs Ansible, clones the repo to `/opt/picluster`, installs
 `piclusterctl`, and creates an SSH key for the `eachan` user if one didn't
 exist.
 
-(Optional but recommended) copy the supervisor's key to every node so future
-deploys don't need passwords:
+## 4. Distribute the SSH key
+
+Before deploying, push the supervisor's SSH key to every host so Ansible can
+use key-based auth (no passwords on each run, and the auto-deploy timer can
+work non-interactively):
 
 ```bash
-for h in supervisor node-1 node-2 node-3 ai; do
-  ssh-copy-id eachan@$h
-done
+piclusterctl setup-keys
 ```
 
-## 4. Run the first deploy
+You'll be prompted once for the SSH password (`w00dhill` by default). The
+command:
+
+- Generates `~/.ssh/id_ed25519` if there isn't one yet,
+- Skips hosts that already accept the key,
+- For the rest, runs `ssh-copy-id` over `sshpass`,
+- If a host has password auth disabled, prints exact copy-paste commands so
+  you can authorize the key manually.
+
+Re-run `piclusterctl setup-keys` at any time to verify all hosts are still
+reachable with the key.
+
+## 5. Run the first deploy
 
 From the supervisor:
 
 ```bash
 piclusterctl deploy
 ```
+
+> If you didn't (or couldn't) run `setup-keys` first, you can do a one-shot
+> password deploy with `piclusterctl deploy --ask-pass --ask-become-pass`.
 
 This runs the entire `site.yml` playbook against every host:
 

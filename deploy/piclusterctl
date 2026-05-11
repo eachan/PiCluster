@@ -28,10 +28,12 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
+import re
+import shutil
 import subprocess
 import sys
-import shutil
 import time
 from pathlib import Path
 
@@ -120,6 +122,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         cmd += ["--limit", args.target]
     if args.check:
         cmd += ["--check", "--diff"]
+    if args.ask_pass:
+        cmd += ["--ask-pass"]
+    if args.ask_become_pass:
+        cmd += ["--ask-become-pass"]
     if args.verbose:
         cmd += ["-" + "v" * min(args.verbose, 4)]
 
@@ -127,9 +133,138 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     log_to_file(f"deploy finished rc={rc}")
     if rc == 0:
         info(color("green", "Deploy completed successfully."))
+    elif rc == 4:  # ansible's "all hosts unreachable" exit code
+        warn(f"Deploy returned exit code {rc} (hosts unreachable).")
+        print()
+        print(color("yellow", "Looks like Ansible can't SSH into the hosts."))
+        print("If you haven't yet, distribute the supervisor's SSH key:")
+        print(color("cyan", "    piclusterctl setup-keys"))
+        print("Or run a one-off deploy with interactive password prompts:")
+        print(color("cyan", "    piclusterctl deploy --ask-pass --ask-become-pass"))
     else:
         warn(f"Deploy returned exit code {rc}")
     return rc
+
+
+# ---------------------------------------------------------------------------
+# setup-keys - distribute supervisor's SSH key to every host
+# ---------------------------------------------------------------------------
+def _list_inventory_hosts() -> list[str]:
+    """Return the set of hostnames in the Ansible inventory."""
+    try:
+        out = subprocess.check_output(
+            ["ansible", "all", "-i", str(INVENTORY), "--list-hosts"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # fall back to a sensible default
+        return ["supervisor", "node-1", "node-2", "node-3", "ai"]
+    hosts: list[str] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("hosts ") or line.endswith(":"):
+            continue
+        if re.match(r"^[A-Za-z0-9._-]+$", line):
+            hosts.append(line)
+    return hosts
+
+
+def _ssh_works(host: str, key: Path | None = None) -> bool:
+    cmd = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=3",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=" + str(Path.home() / ".ssh" / "known_hosts"),
+    ]
+    if key:
+        cmd += ["-i", str(key), "-o", "IdentitiesOnly=yes"]
+    cmd += [f"{SSH_USER}@{host}", "true"]
+    return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
+def cmd_setup_keys(args: argparse.Namespace) -> int:
+    ssh_dir = Path.home() / ".ssh"
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    key_path = ssh_dir / "id_ed25519"
+    pub_path = key_path.with_suffix(".pub")
+
+    if not key_path.exists():
+        info("Generating an ed25519 SSH key for this user…")
+        subprocess.check_call([
+            "ssh-keygen", "-t", "ed25519", "-N", "",
+            "-f", str(key_path), "-C", "picluster-supervisor",
+        ])
+
+    pub_key = pub_path.read_text().strip()
+    hosts = args.hosts or _list_inventory_hosts()
+
+    info(f"Target hosts: {' '.join(hosts)}")
+    info(f"Public key   : {pub_key.split()[1][:16]}…  ({pub_path})")
+    print()
+
+    already_ok: list[str] = []
+    need_copy: list[str] = []
+    for h in hosts:
+        if _ssh_works(h, key=key_path):
+            print(f"  {color('green', 'ok ')}  {h:<14}  key already works")
+            already_ok.append(h)
+        else:
+            need_copy.append(h)
+
+    if not need_copy:
+        info(color("green", "All hosts reachable with the SSH key. Nothing to do."))
+        return 0
+
+    print()
+    use_sshpass = shutil.which("sshpass") is not None
+    password = args.password or os.environ.get("PICLUSTER_SSH_PASSWORD")
+    if not use_sshpass:
+        warn("sshpass not installed (try: sudo apt install -y sshpass). "
+             "Falling back to manual mode.")
+
+    if use_sshpass and not password:
+        try:
+            password = getpass.getpass(f"SSH password for {SSH_USER}: ")
+        except EOFError:
+            password = None
+
+    failed: list[str] = []
+    for h in need_copy:
+        if use_sshpass and password:
+            info(f"Copying key to {h}…")
+            rc = subprocess.call([
+                "sshpass", "-p", password,
+                "ssh-copy-id",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-i", str(pub_path),
+                f"{SSH_USER}@{h}",
+            ])
+            if rc == 0 and _ssh_works(h, key=key_path):
+                print(f"  {color('green', 'ok ')}  {h:<14}  key installed")
+                continue
+            warn(f"  could not push key to {h} via password "
+                 f"(rc={rc}). Falling back to manual.")
+        failed.append(h)
+
+    if failed:
+        print()
+        warn("Could not automatically install the key on these hosts:")
+        for h in failed:
+            print(f"   - {h}")
+        print()
+        print("Run this command (or paste the key) on each remaining host:")
+        print()
+        print(color("cyan",
+                    "  mkdir -p ~/.ssh && chmod 700 ~/.ssh && \\\n"
+                    f"    echo '{pub_key}' >> ~/.ssh/authorized_keys && \\\n"
+                    "    chmod 600 ~/.ssh/authorized_keys"))
+        print()
+        warn("Then re-run: piclusterctl setup-keys  (to verify)")
+        return 1
+
+    info(color("green", "All hosts now reachable via SSH key."))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +359,19 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--skip-tags", help="ansible --skip-tags list")
     d.add_argument("--target", help="limit to host or group (e.g. node-1 / cluster)")
     d.add_argument("--check", action="store_true", help="run in --check --diff mode")
+    d.add_argument("--ask-pass", action="store_true",
+                   help="prompt for the SSH password (passes --ask-pass to ansible)")
+    d.add_argument("--ask-become-pass", action="store_true",
+                   help="prompt for the sudo password")
     d.add_argument("-v", "--verbose", action="count", default=0)
     d.set_defaults(func=cmd_deploy)
+
+    k = sub.add_parser("setup-keys",
+                       help="distribute this host's SSH key to every node (one-time)")
+    k.add_argument("--password", help="SSH password (else $PICLUSTER_SSH_PASSWORD or prompted)")
+    k.add_argument("--hosts", nargs="*",
+                   help="optional explicit host list (default: inventory)")
+    k.set_defaults(func=cmd_setup_keys)
 
     s = sub.add_parser("status", help="show cluster + node status")
     s.set_defaults(func=cmd_status)

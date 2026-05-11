@@ -96,10 +96,10 @@ cat <<EOF
 ${GREEN}Bootstrap complete.${RESET}
 
 Next steps:
-  1. (optional) Copy your SSH key to the cluster:
-       for h in node-1 node-2 node-3 ai supervisor; do
-         ssh-copy-id eachan@\$h
-       done
+  1. Distribute the supervisor's SSH key to all hosts (one-time):
+       piclusterctl setup-keys
+     (you'll be prompted once for the SSH password)
+
   2. Run the full deploy:
        piclusterctl deploy
 
