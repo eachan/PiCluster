@@ -20,9 +20,16 @@
 
 set -euo pipefail
 
-REPO="${PICLUSTER_REPO:-https://github.com/CHANGEME/PiCluster.git}"
+REPO="${PICLUSTER_REPO:-https://github.com/eachan/PiCluster.git}"
 BRANCH="${PICLUSTER_BRANCH:-main}"
 ROOT="${PICLUSTER_ROOT:-/opt/picluster}"
+
+# If the repo is private, pass a GitHub personal access token via PICLUSTER_TOKEN
+# and we'll insert it into the HTTPS URL transparently. For SSH urls (git@...)
+# we use whatever ~/.ssh provides.
+if [[ -n "${PICLUSTER_TOKEN:-}" && "${REPO}" == https://github.com/* ]]; then
+  REPO="${REPO/https:\/\/github.com/https:\/\/x-access-token:${PICLUSTER_TOKEN}@github.com}"
+fi
 
 GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; DIM="\033[2m"; RESET="\033[0m"
 log()  { printf "${GREEN}==>${RESET} %s\n" "$*"; }
