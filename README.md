@@ -27,7 +27,7 @@ Resolving all hostnames is assumed to be handled by your LAN DNS.
 .
 ├── ansible/                  # Ansible inventory, playbooks, roles
 │   ├── inventory/hosts.yml
-│   ├── group_vars/all.yml
+│   ├── inventory/group_vars/all.yml
 │   ├── site.yml              # top-level playbook (everything)
 │   ├── playbooks/            # focused per-tier playbooks
 │   └── roles/                # idempotent roles
@@ -76,6 +76,6 @@ together.
 | Ollama URL (cluster-internal) | `http://ai:11434/`            |
 
 Default credentials and other secrets are read from
-`ansible/group_vars/all.yml`. **Change them before you deploy in any
+`ansible/inventory/group_vars/all.yml`. **Change them before you deploy in any
 shared environment** (see [`docs/SETUP.md`](docs/SETUP.md) for which
 values are mandatory).

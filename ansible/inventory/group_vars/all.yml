@@ -4,8 +4,9 @@
 # =============================================================================
 # CHANGE THE PASSWORDS / TOKENS BELOW BEFORE DEPLOYING ANYWHERE PUBLIC.
 # For real secrets, move these into an ansible-vault encrypted file:
-#     ansible-vault create ../group_vars/secret.yml
-# and Ansible will load both files automatically.
+#     ansible-vault create secret.yml
+# Ansible will load both files automatically when they live in the same
+# group_vars/ directory.
 
 # ---------------------------------------------------------------------------
 # Credentials & SSH
@@ -73,8 +74,7 @@ samba_password: w00dhill
 # your LAN; the three nodes will float this address between them.
 ctdb_public_addresses:
   - "192.168.1.50/24 eth0"
-# Internal addresses (one per node) used by CTDB to talk to itself. Edit to
-# match your network if it isn't a /24 with .101/.102/.103 layout.
+# Internal addresses (one per node) used by CTDB to talk to itself.
 ctdb_nodes:
   - "192.168.1.134"
   - "192.168.1.230"

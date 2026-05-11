@@ -100,7 +100,12 @@ def _read_group_var(name: str) -> Any:
     parse the file directly here and pass key auth values through to
     ansible-playbook explicitly.
     """
-    path = ANSIBLE_DIR / "group_vars" / "all.yml"
+    # group_vars must live next to the inventory file for Ansible to pick
+    # it up reliably across versions.
+    path = ANSIBLE_DIR / "inventory" / "group_vars" / "all.yml"
+    if not path.exists():
+        # Fallback - older layout placed it next to the playbook.
+        path = ANSIBLE_DIR / "group_vars" / "all.yml"
     if not path.exists():
         return None
     try:

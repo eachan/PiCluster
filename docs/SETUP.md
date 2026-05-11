@@ -23,7 +23,7 @@ CTDB needs:
 - An unused address on your LAN (the **VIP** that Windows clients use).
 - The three cluster nodes' fixed addresses.
 
-Edit `ansible/group_vars/all.yml` and set `ctdb_public_addresses` and
+Edit `ansible/inventory/group_vars/all.yml` and set `ctdb_public_addresses` and
 `ctdb_nodes`. Defaults assume a `192.168.1.0/24` LAN.
 
 > Tip: assign the cluster nodes' fixed IPs via DHCP reservation so the
@@ -39,7 +39,7 @@ git commit -m "Initial PiCluster"
 gh repo create your-user/PiCluster --public --source=. --push   # or use the web UI
 ```
 
-Update `project_repo` in `ansible/group_vars/all.yml` and `REPO` in
+Update `project_repo` in `ansible/inventory/group_vars/all.yml` and `REPO` in
 `scripts/bootstrap-supervisor.sh` to point at the URL you just created.
 
 ## 3. Bootstrap the supervisor
@@ -133,7 +133,7 @@ download is the slowest single step). Subsequent runs are typically <2 minutes.
 
 ## 7. Secrets
 
-The defaults shipped in `group_vars/all.yml` are placeholders that work for a
+The defaults shipped in `inventory/group_vars/all.yml` are placeholders that work for a
 home-lab setup. Before exposing this to anything sensitive:
 
 - Replace `ansible_password`, `ansible_become_password`, `samba_password`,
