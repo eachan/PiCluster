@@ -99,10 +99,17 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     log_to_file(f"\n===== deploy {ts} target={args.target} tags={args.tags} =====")
 
     if not args.no_pull:
-        info("Pulling latest from git…")
-        run(["git", "fetch", "--all"], cwd=PROJECT_ROOT)
-        run(["git", "checkout", args.branch or "main"], cwd=PROJECT_ROOT)
-        run(["git", "pull", "--ff-only"], cwd=PROJECT_ROOT)
+        branch = args.branch or "main"
+        info(f"Syncing {PROJECT_ROOT} to origin/{branch}…")
+        run(["git", "fetch", "--all", "--prune"], cwd=PROJECT_ROOT)
+        # /opt/picluster is a *deployed* clone, not a workspace - we always
+        # want the working tree to match the remote exactly, so a hard reset
+        # is correct here. (Use `git -C /opt/picluster <cmd>` if you really
+        # need to keep local edits.)
+        run(["git", "reset", "--hard", f"origin/{branch}"], cwd=PROJECT_ROOT)
+        run(["git", "clean", "-fdx",
+             "--exclude=local/", "--exclude=.venv/", "--exclude=dashboard/.venv/"],
+            cwd=PROJECT_ROOT)
     else:
         warn("--no-pull: using current local checkout")
 
