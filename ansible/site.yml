@@ -1,0 +1,14 @@
+---
+# Top-level playbook that converges every host into the desired state.
+# Apply the whole thing with:
+#     ansible-playbook site.yml
+# or use tags to apply a subset:
+#     ansible-playbook site.yml --tags k3s
+#     ansible-playbook site.yml --tags storage,samba
+
+- import_playbook: playbooks/common.yml
+- import_playbook: playbooks/storage.yml
+- import_playbook: playbooks/cluster.yml
+- import_playbook: playbooks/samba.yml
+- import_playbook: playbooks/ai.yml
+- import_playbook: playbooks/supervisor.yml

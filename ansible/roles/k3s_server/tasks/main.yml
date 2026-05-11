@@ -1,0 +1,160 @@
+---
+# Install/upgrade K3s in HA mode. The first node in groups['cluster']
+# initialises the cluster (--cluster-init); subsequent nodes --server join it.
+
+# ---------------------------------------------------------------------------
+# Kernel/cmdline prerequisites on Raspberry Pi OS
+# ---------------------------------------------------------------------------
+- name: Detect Raspberry Pi cmdline.txt location
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /boot/firmware/cmdline.txt
+    - /boot/cmdline.txt
+  register: _cmdline_stat
+
+- name: Set cmdline.txt path fact
+  ansible.builtin.set_fact:
+    _cmdline_path: "{{ (_cmdline_stat.results | selectattr('stat.exists') | list | first).stat.path | default('') }}"
+
+- name: Enable cgroup memory + cpuset on cmdline.txt
+  ansible.builtin.replace:
+    path: "{{ _cmdline_path }}"
+    regexp: '^(?!.*cgroup_memory=1)(.*)$'
+    replace: '\1 cgroup_memory=1 cgroup_enable=memory cgroup_enable=cpuset'
+  register: _cmdline_change
+  when: _cmdline_path != ""
+
+- name: Reboot if cgroup flags were just added
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+  when:
+    - _cmdline_change is defined
+    - _cmdline_change.changed | default(false)
+
+- name: Install iptables (legacy mode preferred for K3s on RPi)
+  ansible.builtin.apt:
+    name:
+      - iptables
+      - nfs-common
+      - open-iscsi
+    state: present
+
+- name: Use iptables-legacy
+  community.general.alternatives:
+    name: "{{ item.name }}"
+    path: "{{ item.path }}"
+  loop:
+    - { name: iptables,  path: /usr/sbin/iptables-legacy }
+    - { name: ip6tables, path: /usr/sbin/ip6tables-legacy }
+  ignore_errors: true
+
+- name: UFW - allow K3s API + Flannel VXLAN + Kubelet metrics
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+  loop:
+    - { port: "6443",  proto: tcp }   # K3s API
+    - { port: "10250", proto: tcp }   # Kubelet
+    - { port: "8472",  proto: udp }   # Flannel VXLAN
+    - { port: "2379:2380", proto: tcp } # etcd
+  ignore_errors: true
+
+# ---------------------------------------------------------------------------
+# Install k3s
+# ---------------------------------------------------------------------------
+- name: Check if k3s is already installed at the requested version
+  ansible.builtin.command: k3s --version
+  register: _k3s_installed
+  changed_when: false
+  failed_when: false
+
+- name: Determine whether this is the bootstrap server
+  ansible.builtin.set_fact:
+    _is_bootstrap: "{{ inventory_hostname == groups['cluster'][0] }}"
+
+- name: Build K3s install command (bootstrap)
+  ansible.builtin.set_fact:
+    _k3s_install_exec: >-
+      server
+      --cluster-init
+      --tls-san {{ k3s_api_endpoint }}
+      --disable=servicelb
+      --write-kubeconfig-mode=0644
+      --node-name={{ inventory_hostname }}
+  when: _is_bootstrap
+
+- name: Build K3s install command (joining server)
+  ansible.builtin.set_fact:
+    _k3s_install_exec: >-
+      server
+      --server https://{{ k3s_api_endpoint }}:{{ k3s_api_port }}
+      --tls-san {{ k3s_api_endpoint }}
+      --disable=servicelb
+      --write-kubeconfig-mode=0644
+      --node-name={{ inventory_hostname }}
+  when: not _is_bootstrap
+
+- name: Install/upgrade K3s
+  ansible.builtin.shell: |
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_VERSION="{{ k3s_version }}" \
+      K3S_TOKEN="{{ k3s_token }}" \
+      INSTALL_K3S_EXEC="{{ _k3s_install_exec }}" \
+      sh -
+  args:
+    executable: /bin/bash
+  when: k3s_version not in (_k3s_installed.stdout | default(''))
+  register: _k3s_install
+  changed_when: "'Starting k3s' in _k3s_install.stdout or _k3s_install.rc == 0"
+
+- name: Ensure k3s service is enabled + started
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for the API to become ready
+  ansible.builtin.wait_for:
+    host: "{{ inventory_hostname }}"
+    port: 6443
+    delay: 5
+    timeout: 180
+
+# ---------------------------------------------------------------------------
+# Convenience: copy kubeconfig to ~/.kube/config for the SSH user, and to
+# the project root so the supervisor can fetch it.
+# ---------------------------------------------------------------------------
+- name: Ensure user kube directory exists
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0700"
+  when: _is_bootstrap
+
+- name: Copy kubeconfig for SSH user
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+    remote_src: true
+  when: _is_bootstrap
+
+- name: Rewrite kubeconfig server URL to use {{ k3s_api_endpoint }}
+  ansible.builtin.replace:
+    path: "/home/{{ ansible_user }}/.kube/config"
+    regexp: 'https://127\.0\.0\.1:6443'
+    replace: "https://{{ k3s_api_endpoint }}:6443"
+  when: _is_bootstrap
+
+- name: Fetch kubeconfig back to the controller
+  ansible.builtin.fetch:
+    src: "/home/{{ ansible_user }}/.kube/config"
+    dest: "{{ playbook_dir }}/../../local/kubeconfig"
+    flat: true
+  when: _is_bootstrap

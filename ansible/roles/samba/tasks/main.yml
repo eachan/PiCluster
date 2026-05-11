@@ -1,0 +1,171 @@
+---
+# Install Samba + CTDB on every node. CTDB clusters them so Windows clients
+# always see the same VIP regardless of which node currently owns it.
+
+- name: Install Samba and CTDB
+  ansible.builtin.apt:
+    name:
+      - samba
+      - samba-common-bin
+      - ctdb
+    state: present
+    update_cache: true
+
+- name: Stop services while we reconfigure
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - smbd
+    - nmbd
+    - ctdb
+  failed_when: false
+
+- name: Ensure Samba share directory exists on the Gluster volume
+  ansible.builtin.file:
+    path: "{{ samba_share_path }}"
+    state: directory
+    owner: "{{ samba_user }}"
+    group: "{{ samba_user }}"
+    mode: "0775"
+  run_once: true
+  delegate_to: "{{ groups['cluster'][0] }}"
+
+# ---------------------------------------------------------------------------
+# CTDB configuration
+# ---------------------------------------------------------------------------
+- name: Ensure /etc/ctdb exists
+  ansible.builtin.file:
+    path: /etc/ctdb
+    state: directory
+    mode: "0755"
+
+- name: Write CTDB main config
+  ansible.builtin.copy:
+    dest: /etc/ctdb/ctdb.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [cluster]
+        transport = tcp
+        recovery lock = {{ gluster_mount_point }}/ctdb/recovery.lock
+        node address = {{ ctdb_nodes[gluster_brick_id - 1] }}
+      [legacy]
+        start as stopped = false
+        start as disabled = false
+  notify: restart ctdb
+
+- name: Write CTDB nodes file
+  ansible.builtin.copy:
+    dest: /etc/ctdb/nodes
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {% for n in ctdb_nodes %}
+      {{ n }}
+      {% endfor %}
+  notify: restart ctdb
+
+- name: Write CTDB public addresses
+  ansible.builtin.copy:
+    dest: /etc/ctdb/public_addresses
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {% for a in ctdb_public_addresses %}
+      {{ a }}
+      {% endfor %}
+  notify: restart ctdb
+
+# ---------------------------------------------------------------------------
+# Samba configuration
+# ---------------------------------------------------------------------------
+- name: Ensure Samba user exists at OS level
+  ansible.builtin.user:
+    name: "{{ samba_user }}"
+    state: present
+    shell: /usr/sbin/nologin
+    create_home: false
+  when: samba_user != ansible_user   # the ansible_user already exists
+
+- name: Set Samba password for {{ samba_user }}
+  ansible.builtin.shell: |
+    (echo "{{ samba_password }}"; echo "{{ samba_password }}") | smbpasswd -s -a {{ samba_user }}
+  args:
+    executable: /bin/bash
+  register: _smbpasswd
+  changed_when: "'Added user' in _smbpasswd.stdout or 'New SMB password' in _smbpasswd.stdout"
+  no_log: true
+
+- name: Write smb.conf
+  ansible.builtin.copy:
+    dest: /etc/samba/smb.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [global]
+        workgroup = {{ samba_workgroup }}
+        server string = PiCluster Storage (%h)
+        netbios name = picluster
+        security = user
+        map to guest = bad user
+        clustering = yes
+        ctdbd socket = /var/run/ctdb/ctdbd.socket
+        passdb backend = tdbsam
+        log file = /var/log/samba/log.%m
+        max log size = 1000
+        logging = file
+        panic action = /usr/share/samba/panic-action %d
+        server min protocol = SMB2
+        smb encrypt = desired
+        # gluster integration via fuse mount - good throughput on small files
+        kernel share modes = no
+        kernel oplocks = no
+        posix locking = no
+
+      [{{ samba_share_name }}]
+        comment = PiCluster Replicated Storage
+        path = {{ samba_share_path }}
+        read only = no
+        browseable = yes
+        guest ok = no
+        valid users = {{ samba_user }}
+        create mask = 0664
+        directory mask = 0775
+        force user = {{ samba_user }}
+        force group = {{ samba_user }}
+  notify:
+    - restart samba
+
+- name: Disable default smbd/nmbd so CTDB manages them
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - smbd
+    - nmbd
+  failed_when: false
+
+- name: Enable + start CTDB (manages smbd/nmbd via CTDB events)
+  ansible.builtin.systemd:
+    name: ctdb
+    enabled: true
+    state: started
+
+- name: UFW - allow SMB + CTDB ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+  loop:
+    - { port: "445",  proto: tcp }   # SMB
+    - { port: "139",  proto: tcp }   # NetBIOS-SSN
+    - { port: "137",  proto: udp }   # NetBIOS-NS
+    - { port: "138",  proto: udp }   # NetBIOS-DGM
+    - { port: "4379", proto: tcp }   # CTDB cluster traffic
+  ignore_errors: true

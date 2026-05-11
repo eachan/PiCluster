@@ -1,0 +1,6 @@
+---
+gluster_brick_mount: /srv/brick
+gluster_brick_path: /srv/brick/storage
+gluster_volume_name: storage
+gluster_mount_point: /mnt/storage
+gluster_brick_device_hint: "usb"

@@ -1,0 +1,42 @@
+# Ansible
+*.retry
+ansible/.vault_pass
+ansible/inventory/hosts.local.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Node / frontend (if added later)
+node_modules/
+dist/
+build/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local artefacts
+*.log
+*.pid
+*.bak
+local/
+secrets/
+
+# K3s / kubeconfig
+kubeconfig
+*.kubeconfig
+
+# Generated keys
+ssh_host_*
+id_rsa
+id_rsa.pub

@@ -1,0 +1,9 @@
+---
+# Highly-available Samba (CTDB) on top of the GlusterFS volume.
+- name: Samba + CTDB Windows file share
+  hosts: cluster
+  gather_facts: true
+  become: true
+  tags: [samba, fileshare]
+  roles:
+    - samba

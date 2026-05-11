@@ -1,0 +1,130 @@
+---
+# Install the piclusterctl CLI on the supervisor + (optional) auto-deploy.
+
+- name: Ensure pip + ansible are installed for the supervisor
+  ansible.builtin.apt:
+    name:
+      - ansible
+      - python3-pip
+      - git
+      - rsync
+    state: present
+
+- name: Install ansible-galaxy collections we rely on
+  community.general.ansible_galaxy_install:
+    type: collection
+    name: "{{ item }}"
+    state: present
+  loop:
+    - community.general
+    - ansible.posix
+  failed_when: false   # the module may not exist on older ansible; fall back below
+
+- name: Fallback - install collections via ansible-galaxy CLI
+  ansible.builtin.shell: |
+    ansible-galaxy collection install community.general ansible.posix --upgrade
+  args:
+    creates: /root/.ansible/collections/ansible_collections/community/general
+  failed_when: false
+
+- name: Sync deploy/ + ansible/ to project root
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../{{ item }}/"
+    dest: "{{ project_root }}/{{ item }}/"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    directory_mode: "0755"
+  loop:
+    - deploy
+    - ansible
+    - scripts
+
+- name: Make piclusterctl executable
+  ansible.builtin.file:
+    path: "{{ project_root }}/deploy/piclusterctl"
+    mode: "0755"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+
+- name: Symlink piclusterctl into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ project_root }}/deploy/piclusterctl"
+    dest: /usr/local/bin/piclusterctl
+    state: link
+    force: true
+
+- name: Ensure deploy log file exists and is writable
+  ansible.builtin.file:
+    path: /var/log/picluster-deploy.log
+    state: touch
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+
+- name: Install auto-deploy systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/picluster-autodeploy.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=PiCluster auto deploy (pull + ansible)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      User={{ ansible_user }}
+      Environment=PICLUSTER_ROOT={{ project_root }}
+      ExecStart=/usr/local/bin/piclusterctl deploy
+
+- name: Install auto-deploy systemd timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/picluster-autodeploy.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Run PiCluster auto-deploy on a schedule
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec={{ auto_deploy_interval }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable/disable auto-deploy timer
+  ansible.builtin.systemd:
+    name: picluster-autodeploy.timer
+    daemon_reload: true
+    enabled: "{{ auto_deploy_enabled }}"
+    state: "{{ 'started' if auto_deploy_enabled else 'stopped' }}"
+
+- name: Bash completion stub for piclusterctl
+  ansible.builtin.copy:
+    dest: /etc/bash_completion.d/piclusterctl
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      _piclusterctl_complete() {
+        local cur prev words cword
+        _init_completion || return
+        local subcmds="deploy status run ssh logs version"
+        if [[ $cword -eq 1 ]]; then
+          COMPREPLY=($(compgen -W "$subcmds" -- "$cur"))
+          return
+        fi
+        case "${words[1]}" in
+          deploy) COMPREPLY=($(compgen -W "--no-pull --branch --tags --skip-tags --target --check -v" -- "$cur"));;
+          ssh)    COMPREPLY=($(compgen -W "supervisor node-1 node-2 node-3 ai" -- "$cur"));;
+        esac
+      }
+      complete -F _piclusterctl_complete piclusterctl

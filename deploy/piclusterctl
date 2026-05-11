@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+piclusterctl - one-stop CLI for the PiCluster supervisor.
+
+Examples:
+
+    # Pull latest from git and run the full Ansible site playbook.
+    piclusterctl deploy
+
+    # Same, but only the storage/samba bits.
+    piclusterctl deploy --tags storage,samba
+
+    # Skip the git pull (use local checkout).
+    piclusterctl deploy --no-pull
+
+    # Status across all hosts (uptime, k3s, samba, ollama, storage).
+    piclusterctl status
+
+    # Run a one-off command across every cluster host.
+    piclusterctl run --target cluster -- df -h /mnt/storage
+
+    # SSH helper.
+    piclusterctl ssh node-2
+
+    # Tail the deployment log.
+    piclusterctl logs
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import shutil
+import time
+from pathlib import Path
+
+PROJECT_ROOT = Path(os.environ.get("PICLUSTER_ROOT", "/opt/picluster")).resolve()
+ANSIBLE_DIR = PROJECT_ROOT / "ansible"
+INVENTORY = ANSIBLE_DIR / "inventory" / "hosts.yml"
+LOG_FILE = Path(os.environ.get("PICLUSTER_LOG", "/var/log/picluster-deploy.log"))
+SSH_USER = os.environ.get("PICLUSTER_SSH_USER", "eachan")
+
+C = {
+    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+    "blue": "\033[34m", "green": "\033[32m", "yellow": "\033[33m",
+    "red": "\033[31m", "cyan": "\033[36m",
+}
+USE_COLOR = sys.stdout.isatty()
+
+
+def color(name: str, text: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"{C.get(name, '')}{text}{C['reset']}"
+
+
+def info(msg: str) -> None:
+    print(color("cyan", "==>"), msg)
+
+
+def warn(msg: str) -> None:
+    print(color("yellow", "[warn]"), msg)
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(color("red", "[error]"), msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def run(cmd: list[str], check: bool = True, cwd: Path | None = None,
+        capture: bool = False, env: dict | None = None) -> subprocess.CompletedProcess:
+    info(color("dim", "$ " + " ".join(cmd)))
+    return subprocess.run(cmd, check=check, cwd=cwd,
+                          text=True,
+                          capture_output=capture,
+                          env={**os.environ, **(env or {})})
+
+
+def log_to_file(line: str) -> None:
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_FILE.open("a") as f:
+            f.write(line.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# deploy
+# ---------------------------------------------------------------------------
+def cmd_deploy(args: argparse.Namespace) -> int:
+    if not ANSIBLE_DIR.is_dir():
+        fail(f"Ansible directory not found at {ANSIBLE_DIR} - is PiCluster cloned?")
+
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    log_to_file(f"\n===== deploy {ts} target={args.target} tags={args.tags} =====")
+
+    if not args.no_pull:
+        info("Pulling latest from git…")
+        run(["git", "fetch", "--all"], cwd=PROJECT_ROOT)
+        run(["git", "checkout", args.branch or "main"], cwd=PROJECT_ROOT)
+        run(["git", "pull", "--ff-only"], cwd=PROJECT_ROOT)
+    else:
+        warn("--no-pull: using current local checkout")
+
+    if not shutil.which("ansible-playbook"):
+        fail("ansible-playbook is not installed. Run scripts/bootstrap-supervisor.sh first.")
+
+    cmd: list[str] = [
+        "ansible-playbook",
+        "-i", str(INVENTORY),
+        "site.yml",
+    ]
+    if args.tags:
+        cmd += ["--tags", args.tags]
+    if args.skip_tags:
+        cmd += ["--skip-tags", args.skip_tags]
+    if args.target:
+        cmd += ["--limit", args.target]
+    if args.check:
+        cmd += ["--check", "--diff"]
+    if args.verbose:
+        cmd += ["-" + "v" * min(args.verbose, 4)]
+
+    rc = run(cmd, cwd=ANSIBLE_DIR, check=False).returncode
+    log_to_file(f"deploy finished rc={rc}")
+    if rc == 0:
+        info(color("green", "Deploy completed successfully."))
+    else:
+        warn(f"Deploy returned exit code {rc}")
+    return rc
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+def cmd_status(_: argparse.Namespace) -> int:
+    if not shutil.which("ansible"):
+        fail("ansible is not installed.")
+
+    info("Pinging hosts…")
+    run(["ansible", "all", "-i", str(INVENTORY), "-m", "ping",
+         "--one-line"], cwd=ANSIBLE_DIR, check=False)
+
+    info("Uptime + load:")
+    run(["ansible", "all", "-i", str(INVENTORY),
+         "-a", "uptime", "--one-line"],
+        cwd=ANSIBLE_DIR, check=False)
+
+    info("Disk usage (root + storage):")
+    run(["ansible", "all", "-i", str(INVENTORY),
+         "-a", "df -h --output=target,size,used,avail,pcent / /mnt/storage 2>/dev/null || df -h /",
+         "--one-line"],
+        cwd=ANSIBLE_DIR, check=False)
+
+    info("K3s nodes (from supervisor's kubeconfig, if present):")
+    kc = Path.home() / ".kube" / "config"
+    if kc.exists() and shutil.which("kubectl"):
+        run(["kubectl", "--kubeconfig", str(kc), "get", "nodes", "-o", "wide"], check=False)
+    else:
+        warn("kubectl/kubeconfig not available on this host yet.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# run (ad-hoc command)
+# ---------------------------------------------------------------------------
+def cmd_run(args: argparse.Namespace) -> int:
+    target = args.target or "all"
+    if not args.command:
+        fail("missing command after --")
+    info(f"Running on {target}: {' '.join(args.command)}")
+    rc = run(["ansible", target, "-i", str(INVENTORY),
+              "-a", " ".join(args.command), "--one-line"],
+             cwd=ANSIBLE_DIR, check=False).returncode
+    return rc
+
+
+# ---------------------------------------------------------------------------
+# ssh
+# ---------------------------------------------------------------------------
+def cmd_ssh(args: argparse.Namespace) -> int:
+    return run(["ssh", f"{SSH_USER}@{args.host}", *args.extra], check=False).returncode
+
+
+# ---------------------------------------------------------------------------
+# logs
+# ---------------------------------------------------------------------------
+def cmd_logs(args: argparse.Namespace) -> int:
+    if not LOG_FILE.exists():
+        warn(f"No log file at {LOG_FILE}")
+        return 0
+    if args.follow:
+        return subprocess.run(["tail", "-F", str(LOG_FILE)]).returncode
+    return subprocess.run(["tail", f"-n{args.lines}", str(LOG_FILE)]).returncode
+
+
+# ---------------------------------------------------------------------------
+# version
+# ---------------------------------------------------------------------------
+def cmd_version(_: argparse.Namespace) -> int:
+    sha = "unknown"
+    try:
+        sha = subprocess.check_output(["git", "-C", str(PROJECT_ROOT),
+                                       "rev-parse", "--short", "HEAD"],
+                                      text=True).strip()
+    except subprocess.CalledProcessError:
+        pass
+    print(f"piclusterctl 1.0.0 (commit {sha}, root {PROJECT_ROOT})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="piclusterctl",
+                                description="Manage the PiCluster from the supervisor node.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("deploy", help="git pull + ansible-playbook site.yml")
+    d.add_argument("--no-pull", action="store_true", help="skip git pull")
+    d.add_argument("--branch", help="git branch to deploy (default: main)")
+    d.add_argument("--tags", help="ansible --tags list (comma separated)")
+    d.add_argument("--skip-tags", help="ansible --skip-tags list")
+    d.add_argument("--target", help="limit to host or group (e.g. node-1 / cluster)")
+    d.add_argument("--check", action="store_true", help="run in --check --diff mode")
+    d.add_argument("-v", "--verbose", action="count", default=0)
+    d.set_defaults(func=cmd_deploy)
+
+    s = sub.add_parser("status", help="show cluster + node status")
+    s.set_defaults(func=cmd_status)
+
+    r = sub.add_parser("run", help="run an ad-hoc shell command on hosts")
+    r.add_argument("--target", default="all")
+    r.add_argument("command", nargs=argparse.REMAINDER,
+                   help="command after -- (e.g. -- df -h)")
+    r.set_defaults(func=cmd_run)
+
+    sh = sub.add_parser("ssh", help="ssh into a host as the SSH user")
+    sh.add_argument("host")
+    sh.add_argument("extra", nargs=argparse.REMAINDER)
+    sh.set_defaults(func=cmd_ssh)
+
+    lg = sub.add_parser("logs", help="show deployment log")
+    lg.add_argument("-f", "--follow", action="store_true")
+    lg.add_argument("-n", "--lines", type=int, default=200)
+    lg.set_defaults(func=cmd_logs)
+
+    v = sub.add_parser("version", help="print version")
+    v.set_defaults(func=cmd_version)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        warn("interrupted")
+        return 130
+    except subprocess.CalledProcessError as e:
+        fail(f"command failed (rc={e.returncode})")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,90 @@
+---
+# Install Ollama on the AI Pi. Ollama is a single-binary LLM runner exposing
+# an OpenAI-compatible HTTP API on port 11434. Hailo-8 acceleration is set
+# up separately via the Hailo runtime; Ollama will fall back to CPU
+# automatically and apps can still call it.
+
+- name: Install Ollama (official installer)
+  ansible.builtin.shell: |
+    curl -fsSL https://ollama.com/install.sh | sh
+  args:
+    creates: /usr/local/bin/ollama
+  register: _ollama_install
+
+- name: Ensure /etc/systemd/system/ollama.service.d exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    mode: "0755"
+
+- name: Configure Ollama to listen on all interfaces and enable metrics
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Service]
+      Environment="OLLAMA_HOST={{ ollama_listen_address }}"
+      Environment="OLLAMA_KEEP_ALIVE=24h"
+      Environment="OLLAMA_NUM_PARALLEL=2"
+      Environment="OLLAMA_MAX_LOADED_MODELS=1"
+  notify: restart ollama
+
+- name: Enable + start Ollama
+  ansible.builtin.systemd:
+    name: ollama
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Wait for Ollama API to be ready
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 11434
+    delay: 2
+    timeout: 60
+
+- name: Pre-pull configured models
+  ansible.builtin.command: "ollama pull {{ item }}"
+  loop: "{{ ollama_models }}"
+  register: _ollama_pull
+  changed_when: "'pulling' in _ollama_pull.stdout or 'success' in _ollama_pull.stdout"
+  async: 1800
+  poll: 30
+
+- name: UFW - allow Ollama port within LAN
+  community.general.ufw:
+    rule: allow
+    port: "11434"
+    proto: tcp
+  ignore_errors: true
+
+# ---------------------------------------------------------------------------
+# Optional Hailo runtime - installs HailoRT if the PCIe HAT is detected.
+# Ollama does not currently use Hailo directly, but the runtime is needed
+# by any other AI workloads we deploy on this host.
+# ---------------------------------------------------------------------------
+- name: Check for Hailo PCIe device
+  ansible.builtin.shell: lspci | grep -i hailo || true
+  args:
+    executable: /bin/bash
+  register: _hailo_pci
+  changed_when: false
+
+- name: Install HailoRT prerequisites
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - dkms
+      - linux-headers-generic
+    state: present
+  when: _hailo_pci.stdout != ""
+  failed_when: false
+
+- name: Note Hailo presence
+  ansible.builtin.debug:
+    msg: >-
+      Hailo PCIe device detected on {{ inventory_hostname }}.
+      Run `sudo hailortcli scan` after installing HailoRT to verify.
+  when: _hailo_pci.stdout != ""

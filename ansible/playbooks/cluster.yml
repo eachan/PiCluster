@@ -1,0 +1,11 @@
+---
+# Install K3s on the three cluster nodes in HA mode.
+# node-1 is the bootstrap server; node-2/node-3 join its embedded etcd.
+- name: K3s HA control plane
+  hosts: cluster
+  gather_facts: true
+  become: true
+  serial: 1            # bring servers up one at a time for clean etcd join
+  tags: [cluster, k3s]
+  roles:
+    - role: k3s_server

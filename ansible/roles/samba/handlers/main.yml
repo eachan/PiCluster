@@ -1,0 +1,10 @@
+---
+- name: restart ctdb
+  ansible.builtin.systemd:
+    name: ctdb
+    state: restarted
+
+- name: restart samba
+  ansible.builtin.systemd:
+    name: ctdb
+    state: restarted

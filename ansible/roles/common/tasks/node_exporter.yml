@@ -1,0 +1,79 @@
+---
+# Install Prometheus node_exporter from the official release tarball so we
+# get the same version on every host regardless of distro packaging.
+
+- name: Map Ansible arch to node_exporter arch
+  ansible.builtin.set_fact:
+    _ne_arch: >-
+      {{ {
+        'aarch64': 'arm64',
+        'armv7l':  'armv7',
+        'x86_64':  'amd64'
+      }[ansible_architecture] | default('arm64') }}
+
+- name: Create node_exporter system user
+  ansible.builtin.user:
+    name: node_exporter
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    state: present
+
+- name: Check installed node_exporter version
+  ansible.builtin.command: /usr/local/bin/node_exporter --version
+  register: _ne_installed
+  changed_when: false
+  failed_when: false
+
+- name: Download node_exporter {{ node_exporter_version }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-{{ _ne_arch }}.tar.gz"
+    dest: /tmp/
+    remote_src: true
+    creates: "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ _ne_arch }}"
+  when: node_exporter_version not in (_ne_installed.stderr | default('')) + (_ne_installed.stdout | default(''))
+
+- name: Install node_exporter binary
+  ansible.builtin.copy:
+    src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ _ne_arch }}/node_exporter"
+    dest: /usr/local/bin/node_exporter
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: node_exporter_version not in (_ne_installed.stderr | default('')) + (_ne_installed.stdout | default(''))
+  notify: restart node_exporter
+
+- name: Install node_exporter systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/node_exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Prometheus node_exporter
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=node_exporter
+      Group=node_exporter
+      Type=simple
+      ExecStart=/usr/local/bin/node_exporter \
+        --collector.systemd \
+        --collector.processes \
+        --web.listen-address=:9100
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart node_exporter
+
+- name: Enable + start node_exporter
+  ansible.builtin.systemd:
+    name: node_exporter
+    daemon_reload: true
+    enabled: true
+    state: started

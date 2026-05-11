@@ -1,0 +1,6 @@
+---
+# Set to true to enable a systemd timer that runs `piclusterctl deploy` every
+# 10 minutes (pulls latest from git on the configured branch). Off by default
+# so deploys are explicit.
+auto_deploy_enabled: false
+auto_deploy_interval: "10min"

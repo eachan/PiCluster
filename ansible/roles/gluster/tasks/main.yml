@@ -1,0 +1,172 @@
+---
+# Build a 3-way replicated GlusterFS volume across node-1/2/3 using each
+# node's 1 TB USB drive. Idempotent: re-running is safe.
+
+- name: Install GlusterFS server + client
+  ansible.builtin.apt:
+    name:
+      - glusterfs-server
+      - glusterfs-client
+      - xfsprogs
+    state: present
+    update_cache: true
+
+- name: Enable + start glusterd
+  ansible.builtin.systemd:
+    name: glusterd
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# 1. Identify the USB 1 TB disk and prepare it.
+# ---------------------------------------------------------------------------
+- name: Detect candidate USB block devices (non-root, 500GB+)
+  ansible.builtin.shell: |
+    set -o pipefail
+    lsblk -dn -o NAME,SIZE,TYPE,TRAN,MOUNTPOINT --bytes \
+      | awk '$3=="disk" && $4=="usb" && $5=="" && $2+0>500000000000 {print "/dev/"$1}'
+  args:
+    executable: /bin/bash
+  register: _gluster_candidates
+  changed_when: false
+
+- name: Fail if no USB drive of expected size found
+  ansible.builtin.fail:
+    msg: |
+      Could not find a USB disk of at least 500 GB on {{ inventory_hostname }}.
+      lsblk output was:
+      {{ _gluster_candidates.stdout }}
+  when: _gluster_candidates.stdout_lines | length == 0
+
+- name: Pick the first matching USB drive as our brick device
+  ansible.builtin.set_fact:
+    gluster_brick_device: "{{ _gluster_candidates.stdout_lines[0] }}"
+
+- name: Check if the device already has an XFS filesystem
+  ansible.builtin.command: "blkid -s TYPE -o value {{ gluster_brick_device }}"
+  register: _brick_fs
+  changed_when: false
+  failed_when: false
+
+- name: Create XFS filesystem on the USB drive (only if blank)
+  community.general.filesystem:
+    fstype: xfs
+    dev: "{{ gluster_brick_device }}"
+    opts: "-i size=512 -L gluster-brick-{{ gluster_brick_id }}"
+  when: _brick_fs.stdout | trim == ""
+
+- name: Ensure brick mount directory exists
+  ansible.builtin.file:
+    path: "{{ gluster_brick_mount }}"
+    state: directory
+    mode: "0755"
+
+- name: Mount the brick filesystem
+  ansible.posix.mount:
+    path: "{{ gluster_brick_mount }}"
+    src: "{{ gluster_brick_device }}"
+    fstype: xfs
+    opts: defaults,noatime,nofail
+    state: mounted
+
+- name: Ensure brick directory exists on the mounted disk
+  ansible.builtin.file:
+    path: "{{ gluster_brick_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# ---------------------------------------------------------------------------
+# 2. Open the firewall for inter-node Gluster traffic
+# ---------------------------------------------------------------------------
+- name: UFW - allow Gluster between nodes
+  community.general.ufw:
+    rule: allow
+    port: "24007:24108"
+    proto: tcp
+  ignore_errors: true
+
+# ---------------------------------------------------------------------------
+# 3. Peer probe and volume creation (only on the bootstrap node)
+# ---------------------------------------------------------------------------
+- name: Probe other Gluster peers
+  ansible.builtin.command: "gluster peer probe {{ item }}"
+  loop: "{{ groups['cluster'] | difference([inventory_hostname]) }}"
+  register: _gluster_probe
+  changed_when: "'already in peer list' not in _gluster_probe.stderr | default('') and 'success' in _gluster_probe.stdout | default('')"
+  failed_when:
+    - _gluster_probe.rc != 0
+    - "'already in peer list' not in _gluster_probe.stderr | default('')"
+  when: inventory_hostname == groups['cluster'][0]
+
+- name: Wait briefly for peer connection to settle
+  ansible.builtin.pause:
+    seconds: 5
+  when: inventory_hostname == groups['cluster'][0]
+
+- name: Check whether the volume already exists
+  ansible.builtin.command: "gluster volume info {{ gluster_volume_name }}"
+  register: _gluster_volinfo
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname == groups['cluster'][0]
+
+- name: Create replicated Gluster volume
+  ansible.builtin.command: >-
+    gluster volume create {{ gluster_volume_name }} replica 3 transport tcp
+    {% for h in groups['cluster'] %}{{ h }}:{{ gluster_brick_path }} {% endfor %}
+    force
+  when:
+    - inventory_hostname == groups['cluster'][0]
+    - "'does not exist' in (_gluster_volinfo.stderr | default('')) or _gluster_volinfo.rc != 0"
+  register: _gluster_create
+  changed_when: "'success' in _gluster_create.stdout"
+
+- name: Apply recommended Gluster volume options
+  ansible.builtin.command: "gluster volume set {{ gluster_volume_name }} {{ item.key }} {{ item.value }}"
+  loop:
+    - { key: "performance.cache-size",         value: "256MB" }
+    - { key: "performance.io-thread-count",    value: "16" }
+    - { key: "network.ping-timeout",           value: "10" }
+    - { key: "cluster.self-heal-daemon",       value: "enable" }
+  when: inventory_hostname == groups['cluster'][0]
+  changed_when: false   # set is idempotent; output is noisy
+
+- name: Start the volume
+  ansible.builtin.command: "gluster volume start {{ gluster_volume_name }}"
+  register: _gluster_start
+  changed_when: "'success' in _gluster_start.stdout"
+  failed_when:
+    - _gluster_start.rc != 0
+    - "'already started' not in _gluster_start.stderr | default('')"
+  when: inventory_hostname == groups['cluster'][0]
+
+# ---------------------------------------------------------------------------
+# 4. Mount the assembled volume on every node so Samba / apps can use it
+# ---------------------------------------------------------------------------
+- name: Ensure cluster mount point exists
+  ansible.builtin.file:
+    path: "{{ gluster_mount_point }}"
+    state: directory
+    mode: "0755"
+
+- name: Mount Gluster volume on each node
+  ansible.posix.mount:
+    path: "{{ gluster_mount_point }}"
+    src: "{{ inventory_hostname }}:/{{ gluster_volume_name }}"
+    fstype: glusterfs
+    opts: "defaults,_netdev,backupvolfile-server={{ groups['cluster'] | difference([inventory_hostname]) | join(':') }}"
+    state: mounted
+
+- name: Ensure share + apps directories exist on the volume
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0775"
+  loop:
+    - "{{ gluster_mount_point }}/share"
+    - "{{ gluster_mount_point }}/apps"
+    - "{{ gluster_mount_point }}/ctdb"
+  run_once: true
+  delegate_to: "{{ groups['cluster'][0] }}"

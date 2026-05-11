@@ -1,0 +1,9 @@
+---
+# Common baseline applied to every host.
+- name: Baseline configuration for all PiCluster hosts
+  hosts: all
+  gather_facts: true
+  become: true
+  tags: [common]
+  roles:
+    - common

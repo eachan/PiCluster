@@ -1,0 +1,99 @@
+---
+# Baseline configuration for every host: hostname, packages, timezone,
+# kernel tweaks, firewall, node_exporter.
+
+- name: Set hostname to inventory name
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Ensure /etc/hosts has 127.0.1.1 entry for hostname
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+    state: present
+
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ system_timezone | default('UTC') }}"
+  ignore_errors: true   # community.general isn't required to be present
+
+- name: APT - update cache (daily)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 86400
+
+- name: APT - install baseline packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - wget
+      - git
+      - htop
+      - jq
+      - unzip
+      - rsync
+      - vim
+      - tmux
+      - python3
+      - python3-pip
+      - python3-venv
+      - chrony
+      - ufw
+      - net-tools
+      - dnsutils
+      - parted
+      - lsb-release
+      - gnupg
+    state: present
+
+- name: Enable + start chrony for time sync
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Ensure project directory exists
+  ansible.builtin.file:
+    path: "{{ project_root }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+# A simple, permissive baseline firewall: allow SSH from anywhere, deny new
+# inbound by default, allow all from LAN subnet 192.168.0.0/16 (cluster
+# traffic, Samba, K3s, Prometheus). Adjust LAN range in group_vars if needed.
+- name: UFW - default deny incoming
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+  ignore_errors: true
+
+- name: UFW - default allow outgoing
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+  ignore_errors: true
+
+- name: UFW - allow SSH
+  community.general.ufw:
+    rule: allow
+    name: OpenSSH
+  ignore_errors: true
+
+- name: UFW - allow LAN subnet
+  community.general.ufw:
+    rule: allow
+    src: "{{ lan_cidr | default('192.168.0.0/16') }}"
+  ignore_errors: true
+
+- name: UFW - enable
+  community.general.ufw:
+    state: enabled
+  ignore_errors: true
+
+# node_exporter on every host so Prometheus on the supervisor can scrape it.
+- name: Install node_exporter
+  ansible.builtin.include_tasks: node_exporter.yml

@@ -1,0 +1,119 @@
+---
+# Auto-start a fullscreen Chromium pointing at the dashboard on HDMI0.
+# Works on Raspberry Pi OS Bookworm (Wayland/labwc) and earlier X11/openbox.
+
+- name: Install kiosk packages
+  ansible.builtin.apt:
+    name:
+      - chromium-browser
+      - unclutter             # hide the mouse cursor when idle
+      - xserver-xorg
+      - x11-xserver-utils
+      - xinit
+      - openbox
+      - lightdm
+    state: present
+  failed_when: false   # chromium-browser package name varies by release
+
+- name: Install Chromium fallback (Debian package name)
+  ansible.builtin.apt:
+    name: chromium
+    state: present
+  failed_when: false
+
+- name: Ensure SSH user can run X
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: video,tty,input,render
+    append: true
+
+# ---------------------------------------------------------------------------
+# Configure LightDM for automatic login of the eachan user.
+# ---------------------------------------------------------------------------
+- name: Configure LightDM auto-login
+  ansible.builtin.copy:
+    dest: /etc/lightdm/lightdm.conf.d/50-picluster-autologin.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Seat:*]
+      autologin-user={{ ansible_user }}
+      autologin-user-timeout=0
+      user-session=openbox
+  failed_when: false
+
+- name: Ensure openbox autostart directory exists
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.config/openbox"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Write openbox autostart that launches Chromium kiosk
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/.config/openbox/autostart"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # PiCluster kiosk session
+
+      # Disable screen blanking + power saving on HDMI0
+      xset -dpms
+      xset s off
+      xset s noblank
+
+      # Hide cursor when idle for 2 seconds
+      unclutter -idle 2 -root &
+
+      # Pick chromium binary
+      CHROMIUM="$(command -v chromium-browser || command -v chromium)"
+
+      # Restore any clean exit flags so chromium doesn't show the warning bar
+      sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' \
+        "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+      sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' \
+        "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+
+      # Launch fullscreen kiosk
+      while true ; do
+        "$CHROMIUM" \
+          --kiosk \
+          --noerrdialogs \
+          --disable-infobars \
+          --disable-translate \
+          --disable-features=TranslateUI \
+          --check-for-update-interval=31536000 \
+          --no-first-run \
+          --start-fullscreen \
+          --window-position=0,0 \
+          --user-data-dir="$HOME/.config/chromium-kiosk" \
+          --app=http://localhost/
+        sleep 5
+      done
+
+- name: Detect cmdline.txt location
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /boot/firmware/cmdline.txt
+    - /boot/cmdline.txt
+  register: _kiosk_cmdline_stat
+
+- name: Ensure HDMI0 is preferred output (cmdline)
+  ansible.builtin.replace:
+    path: "{{ (_kiosk_cmdline_stat.results | selectattr('stat.exists') | list | first).stat.path }}"
+    regexp: '^(?!.*video=HDMI-A-1)(.*)$'
+    replace: '\1 video=HDMI-A-1:1920x1080@60'
+  when: (_kiosk_cmdline_stat.results | selectattr('stat.exists') | list | length) > 0
+  failed_when: false
+
+- name: Enable LightDM service (graphical target)
+  ansible.builtin.systemd:
+    name: lightdm
+    enabled: true
+    state: started
+  failed_when: false

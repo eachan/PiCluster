@@ -1,0 +1,11 @@
+---
+- name: restart dashboard
+  ansible.builtin.systemd:
+    name: picluster-dashboard
+    daemon_reload: true
+    state: restarted
+
+- name: reload nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded

@@ -1,0 +1,16 @@
+---
+# Supervisor: monitoring stack, dashboard app, kiosk display, deploy tool.
+- name: Supervisor monitoring + dashboard + kiosk
+  hosts: supervisor
+  gather_facts: true
+  become: true
+  tags: [supervisor]
+  roles:
+    - role: monitoring
+      tags: [supervisor, monitoring]
+    - role: dashboard
+      tags: [supervisor, dashboard]
+    - role: kiosk
+      tags: [supervisor, kiosk]
+    - role: deploy_tool
+      tags: [supervisor, deploy]

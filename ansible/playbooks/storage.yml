@@ -1,0 +1,9 @@
+---
+# Provision USB drives + GlusterFS replicated volume across the three nodes.
+- name: GlusterFS distributed/replicated storage
+  hosts: cluster
+  gather_facts: true
+  become: true
+  tags: [storage, gluster]
+  roles:
+    - gluster

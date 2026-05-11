@@ -1,0 +1,184 @@
+---
+# Deploy the PiCluster supervisor dashboard.
+
+- name: Install dashboard system dependencies
+  ansible.builtin.apt:
+    name:
+      - python3-venv
+      - python3-pip
+    state: present
+
+- name: Ensure dashboard directory exists
+  ansible.builtin.file:
+    path: "{{ project_root }}/dashboard"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Sync dashboard source files
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../dashboard/"
+    dest: "{{ project_root }}/dashboard/"
+    delete: true
+    rsync_opts: ["--exclude=.venv", "--exclude=__pycache__"]
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Fallback - copy dashboard source files (when synchronize unavailable)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../dashboard/"
+    dest: "{{ project_root }}/dashboard/"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    directory_mode: "0755"
+
+- name: Create dashboard virtualenv and install requirements
+  ansible.builtin.pip:
+    requirements: "{{ project_root }}/dashboard/requirements.txt"
+    virtualenv: "{{ project_root }}/dashboard/.venv"
+    virtualenv_command: /usr/bin/python3 -m venv
+
+- name: Ensure kubeconfig is available on supervisor for the dashboard
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0700"
+
+- name: Copy kubeconfig from controller to supervisor (if previously fetched)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../local/kubeconfig"
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+  failed_when: false
+  ignore_errors: true
+
+- name: Install kubectl (for the dashboard to use)
+  ansible.builtin.shell: |
+    set -e
+    arch=$(dpkg --print-architecture)
+    case "$arch" in
+      arm64) k_arch=arm64 ;;
+      armhf) k_arch=arm ;;
+      amd64) k_arch=amd64 ;;
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+    esac
+    ver=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+    curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${ver}/bin/linux/${k_arch}/kubectl"
+    chmod 0755 /usr/local/bin/kubectl
+  args:
+    creates: /usr/local/bin/kubectl
+
+- name: Install dashboard systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/picluster-dashboard.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=PiCluster supervisor dashboard
+      After=network-online.target prometheus.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ ansible_user }}
+      Group={{ ansible_user }}
+      WorkingDirectory={{ project_root }}/dashboard
+      Environment=PROMETHEUS_URL=http://localhost:9090
+      Environment=OLLAMA_URL=http://{{ groups['ai'][0] }}:11434
+      Environment=SAMBA_VIP={{ ctdb_public_addresses[0].split('/')[0] }}
+      Environment=SAMBA_SHARE={{ samba_share_name }}
+      Environment=CLUSTER_HOSTS={{ groups['cluster'] | join(',') }}
+      Environment=SUPERVISOR_HOST={{ inventory_hostname }}
+      Environment=AI_HOST={{ groups['ai'][0] }}
+      Environment=KUBECONFIG=/home/{{ ansible_user }}/.kube/config
+      Environment=PORT={{ dashboard_internal_port }}
+      Environment=STATIC_DIR={{ project_root }}/dashboard/static
+      ExecStart={{ project_root }}/dashboard/.venv/bin/python -m uvicorn app:app \
+        --host 0.0.0.0 --port {{ dashboard_internal_port }} --log-level info
+      Restart=on-failure
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart dashboard
+
+- name: Enable + start dashboard
+  ansible.builtin.systemd:
+    name: picluster-dashboard
+    daemon_reload: true
+    enabled: true
+    state: started
+
+# Expose dashboard on port 80 via a tiny nginx (or socat) front so the kiosk
+# can simply hit http://supervisor/ rather than :8000.
+- name: Install nginx for dashboard front
+  ansible.builtin.apt:
+    name: nginx-light
+    state: present
+
+- name: Configure nginx as reverse proxy
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/picluster
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      server {
+        listen {{ dashboard_port }} default_server;
+        listen [::]:{{ dashboard_port }} default_server;
+        server_name _;
+
+        # WebSocket upgrade
+        location /ws {
+          proxy_pass http://127.0.0.1:{{ dashboard_internal_port }};
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_read_timeout 86400s;
+          proxy_send_timeout 86400s;
+        }
+
+        location / {
+          proxy_pass http://127.0.0.1:{{ dashboard_internal_port }};
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+      }
+  notify: reload nginx
+
+- name: Enable PiCluster nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/picluster
+    dest: /etc/nginx/sites-enabled/picluster
+    state: link
+  notify: reload nginx
+
+- name: Remove default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Enable + start nginx
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: UFW - allow HTTP for the dashboard
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+  ignore_errors: true

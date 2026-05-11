@@ -1,0 +1,42 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: picluster
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node
+    static_configs:
+{% for host in groups['all'] %}
+      - targets: ['{{ host }}:9100']
+        labels:
+          host: '{{ host }}'
+          role: '{{ "supervisor" if host == "supervisor" else ("ai" if host == "ai" else "cluster") }}'
+{% endfor %}
+
+  # K3s built-in metrics endpoint on each node
+  - job_name: k3s
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+{% for host in groups['cluster'] %}
+      - targets: ['{{ host }}:10249']
+        labels:
+          host: '{{ host }}'
+{% endfor %}
+
+  # Ollama metrics (if enabled in /etc/default/ollama)
+  - job_name: ollama
+    static_configs:
+      - targets: ['ai:11434']
+        labels:
+          host: 'ai'
+
+  # PiCluster dashboard backend - exposes its own /metrics
+  - job_name: picluster_dashboard
+    static_configs:
+      - targets: ['localhost:{{ dashboard_internal_port }}']

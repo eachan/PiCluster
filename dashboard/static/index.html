@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>PiCluster</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <!-- Stylised stacked-cube logo -->
+          <svg viewBox="0 0 32 32" width="28" height="28">
+            <g fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linejoin="round" stroke-linecap="round">
+              <path d="M16 4 4 10v12l12 6 12-6V10z" />
+              <path d="M4 10l12 6 12-6M16 16v12" />
+            </g>
+          </svg>
+        </span>
+        <h1>PiCluster</h1>
+      </div>
+      <div class="meta">
+        <span id="connection" class="pill pill-warn">connecting…</span>
+        <span id="clock" class="clock"></span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <!-- Top stats strip -->
+      <section class="card stat-strip">
+        <div class="stat"><span class="stat-label">Hosts up</span>
+          <span class="stat-value" id="stat-hosts">—</span></div>
+        <div class="stat"><span class="stat-label">Cluster pods running</span>
+          <span class="stat-value" id="stat-pods">—</span></div>
+        <div class="stat"><span class="stat-label">Storage used</span>
+          <span class="stat-value" id="stat-storage">—</span></div>
+        <div class="stat"><span class="stat-label">AI models</span>
+          <span class="stat-value" id="stat-models">—</span></div>
+      </section>
+
+      <!-- Hosts -->
+      <section class="card host-card">
+        <header class="card-header"><h2>Hosts</h2></header>
+        <div id="hosts" class="hosts"></div>
+      </section>
+
+      <!-- Cluster + apps -->
+      <section class="card">
+        <header class="card-header"><h2>Kubernetes cluster</h2></header>
+        <div id="cluster" class="cluster"></div>
+        <header class="card-header sub"><h3>Hosted apps</h3></header>
+        <div id="apps" class="apps"></div>
+      </section>
+
+      <!-- Storage -->
+      <section class="card">
+        <header class="card-header"><h2>Network storage</h2></header>
+        <div id="storage" class="storage"></div>
+      </section>
+
+      <!-- Services -->
+      <section class="card">
+        <header class="card-header"><h2>Services</h2></header>
+        <div id="services" class="services"></div>
+      </section>
+
+      <!-- AI -->
+      <section class="card">
+        <header class="card-header"><h2>AI / Ollama</h2></header>
+        <div id="ai" class="ai"></div>
+      </section>
+    </main>
+
+    <footer class="bottombar">
+      <span>PiCluster supervisor · <a href="http://supervisor:3000" target="_blank" rel="noopener">Grafana</a> · <a href="http://supervisor:9090" target="_blank" rel="noopener">Prometheus</a></span>
+      <span id="last-update">last update —</span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

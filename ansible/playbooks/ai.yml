@@ -1,0 +1,9 @@
+---
+# Ollama LLM service on the Hailo-equipped Pi.
+- name: Ollama LLM service
+  hosts: ai
+  gather_facts: true
+  become: true
+  tags: [ai, ollama]
+  roles:
+    - ollama

@@ -1,0 +1,5 @@
+---
+k3s_version: v1.30.4+k3s1
+k3s_token: "PiClusterJoinTokenChangeMe"
+k3s_api_endpoint: "node-1"
+k3s_api_port: 6443

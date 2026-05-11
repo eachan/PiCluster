@@ -1,0 +1,205 @@
+---
+# Prometheus + Grafana on the supervisor.
+
+# ---------------------------------------------------------------------------
+# Prometheus
+# ---------------------------------------------------------------------------
+- name: Map Ansible arch to Prometheus arch
+  ansible.builtin.set_fact:
+    _prom_arch: >-
+      {{ {
+        'aarch64': 'arm64',
+        'armv7l':  'armv7',
+        'x86_64':  'amd64'
+      }[ansible_architecture] | default('arm64') }}
+
+- name: Create prometheus user
+  ansible.builtin.user:
+    name: prometheus
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/prometheus
+    create_home: true
+    state: present
+
+- name: Create Prometheus directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+  loop:
+    - /etc/prometheus
+    - /var/lib/prometheus
+
+- name: Check installed Prometheus version
+  ansible.builtin.command: /usr/local/bin/prometheus --version
+  register: _prom_installed
+  changed_when: false
+  failed_when: false
+
+- name: Download Prometheus {{ prometheus_version }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-{{ _prom_arch }}.tar.gz"
+    dest: /tmp/
+    remote_src: true
+    creates: "/tmp/prometheus-{{ prometheus_version }}.linux-{{ _prom_arch }}"
+  when: prometheus_version not in (_prom_installed.stdout | default(''))
+
+- name: Install Prometheus binaries
+  ansible.builtin.copy:
+    src: "/tmp/prometheus-{{ prometheus_version }}.linux-{{ _prom_arch }}/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - prometheus
+    - promtool
+  when: prometheus_version not in (_prom_installed.stdout | default(''))
+  notify: restart prometheus
+
+- name: Write prometheus.yml
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+  notify: reload prometheus
+
+- name: Install Prometheus systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/prometheus.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Prometheus
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      User=prometheus
+      Group=prometheus
+      Type=simple
+      ExecStart=/usr/local/bin/prometheus \
+        --config.file=/etc/prometheus/prometheus.yml \
+        --storage.tsdb.path=/var/lib/prometheus \
+        --storage.tsdb.retention.time=30d \
+        --web.listen-address=:9090 \
+        --web.enable-lifecycle
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart prometheus
+
+- name: Enable + start Prometheus
+  ansible.builtin.systemd:
+    name: prometheus
+    daemon_reload: true
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# Grafana
+# ---------------------------------------------------------------------------
+- name: Add Grafana APT signing key
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /etc/apt/keyrings/grafana.asc
+    mode: "0644"
+
+- name: Add Grafana APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/grafana.list
+    content: |
+      deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main
+    mode: "0644"
+
+- name: Install Grafana
+  ansible.builtin.apt:
+    name: grafana
+    state: present
+    update_cache: true
+
+- name: Set Grafana admin password
+  ansible.builtin.lineinfile:
+    path: /etc/grafana/grafana.ini
+    regexp: '^;?admin_password\s*='
+    line: "admin_password = {{ grafana_admin_password }}"
+    insertafter: '^\[security\]'
+
+- name: Provision Prometheus datasource
+  ansible.builtin.copy:
+    dest: /etc/grafana/provisioning/datasources/prometheus.yml
+    owner: root
+    group: grafana
+    mode: "0640"
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          access: proxy
+          url: http://localhost:9090
+          isDefault: true
+          editable: true
+
+- name: Ensure Grafana dashboards provisioning dir exists
+  ansible.builtin.file:
+    path: /etc/grafana/provisioning/dashboards
+    state: directory
+    owner: root
+    group: grafana
+    mode: "0750"
+
+- name: Provision dashboards directory configuration
+  ansible.builtin.copy:
+    dest: /etc/grafana/provisioning/dashboards/picluster.yml
+    owner: root
+    group: grafana
+    mode: "0640"
+    content: |
+      apiVersion: 1
+      providers:
+        - name: PiCluster
+          folder: PiCluster
+          type: file
+          updateIntervalSeconds: 30
+          options:
+            path: /var/lib/grafana/dashboards
+
+- name: Ensure dashboards dir exists
+  ansible.builtin.file:
+    path: /var/lib/grafana/dashboards
+    state: directory
+    owner: grafana
+    group: grafana
+    mode: "0755"
+
+- name: Install the bundled Node Exporter Full dashboard
+  ansible.builtin.copy:
+    src: node-exporter-full.json
+    dest: /var/lib/grafana/dashboards/node-exporter-full.json
+    owner: grafana
+    group: grafana
+    mode: "0644"
+
+- name: Enable + start Grafana
+  ansible.builtin.systemd:
+    name: grafana-server
+    enabled: true
+    state: started
+
+- name: UFW - allow Prometheus + Grafana
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: ["3000", "9090"]
+  ignore_errors: true
