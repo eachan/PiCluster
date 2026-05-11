@@ -34,8 +34,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(os.environ.get("PICLUSTER_ROOT", "/opt/picluster")).resolve()
 ANSIBLE_DIR = PROJECT_ROOT / "ansible"
@@ -88,6 +90,30 @@ def log_to_file(line: str) -> None:
         pass
 
 
+def _read_group_var(name: str) -> Any:
+    """Read a single top-level variable from ansible/group_vars/all.yml.
+
+    Ansible *should* load that file automatically, but if its variable
+    precedence rules don't propagate `ansible_become_password` to the play
+    for some reason (different inventory layout, /etc/ansible/ansible.cfg
+    on the host, etc.), we still want deploys to be non-interactive. So we
+    parse the file directly here and pass key auth values through to
+    ansible-playbook explicitly.
+    """
+    path = ANSIBLE_DIR / "group_vars" / "all.yml"
+    if not path.exists():
+        return None
+    try:
+        import yaml  # provided by Ansible's own dependencies
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return None
+    return data.get(name) if isinstance(data, dict) else None
+
+
 # ---------------------------------------------------------------------------
 # deploy
 # ---------------------------------------------------------------------------
@@ -136,7 +162,31 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     if args.verbose:
         cmd += ["-" + "v" * min(args.verbose, 4)]
 
-    rc = run(cmd, cwd=ANSIBLE_DIR, check=False).returncode
+    # If group_vars/all.yml has a become password, surface it via the official
+    # ANSIBLE_BECOME_PASSWORD_FILE env var. Using a 0600 temp file avoids
+    # putting the password on the command line.
+    extra_env: dict[str, str] = {}
+    pw_file: Path | None = None
+    if not args.ask_become_pass:
+        become_pw = _read_group_var("ansible_become_password")
+        if become_pw:
+            fd, p = tempfile.mkstemp(prefix="picluster-become-", suffix=".txt")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(str(become_pw))
+                os.chmod(p, 0o600)
+                pw_file = Path(p)
+                extra_env["ANSIBLE_BECOME_PASSWORD_FILE"] = str(pw_file)
+                info(color("dim", "(using become password from group_vars/all.yml)"))
+            except Exception:
+                if Path(p).exists():
+                    Path(p).unlink()
+
+    try:
+        rc = run(cmd, cwd=ANSIBLE_DIR, env=extra_env, check=False).returncode
+    finally:
+        if pw_file and pw_file.exists():
+            pw_file.unlink()
     log_to_file(f"deploy finished rc={rc}")
     if rc == 0:
         info(color("green", "Deploy completed successfully."))
