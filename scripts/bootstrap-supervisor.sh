@@ -76,9 +76,14 @@ else
   git clone --branch "${BRANCH}" "${REPO}" "${ROOT}"
 fi
 
-log "Linking piclusterctl into /usr/local/bin"
-sudo ln -sf "${ROOT}/deploy/piclusterctl" /usr/local/bin/piclusterctl
-sudo chmod 0755 "${ROOT}/deploy/piclusterctl"
+log "Installing piclusterctl wrapper at /usr/local/bin/piclusterctl"
+# A small wrapper insulates us from whether the underlying Python file has the
+# executable bit (which can be lost across git operations / filesystems).
+sudo tee /usr/local/bin/piclusterctl > /dev/null <<WRAPPER
+#!/bin/sh
+exec /usr/bin/python3 "${ROOT}/deploy/piclusterctl" "\$@"
+WRAPPER
+sudo chmod 0755 /usr/local/bin/piclusterctl
 
 log "Preparing deploy log"
 sudo touch /var/log/picluster-deploy.log
