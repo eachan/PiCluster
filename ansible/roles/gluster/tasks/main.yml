@@ -52,7 +52,8 @@
   community.general.filesystem:
     fstype: xfs
     dev: "{{ gluster_brick_device }}"
-    opts: "-i size=512 -L gluster-brick-{{ gluster_brick_id }}"
+    # XFS labels are limited to 12 characters - keep it short.
+    opts: "-i size=512 -L gbrick-{{ gluster_brick_id }}"
   when: _brick_fs.stdout | trim == ""
 
 - name: Ensure brick mount directory exists
