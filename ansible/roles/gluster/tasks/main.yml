@@ -42,19 +42,72 @@
   ansible.builtin.set_fact:
     gluster_brick_device: "{{ _gluster_candidates.stdout_lines[0] }}"
 
-- name: Check if the device already has an XFS filesystem
+# ---------------------------------------------------------------------------
+#  Prepare the USB drive for use as a Gluster brick.
+#
+#  The drive may arrive with:
+#    - a vendor filesystem (e.g. exFAT) auto-mounted by udisks2,
+#    - a partition table (so `blkid -s TYPE` on /dev/sda is empty even
+#      though /dev/sda1 etc are in use),
+#    - or already-formatted XFS from a previous deploy.
+#
+#  We re-format the device only when it isn't already our XFS brick.
+# ---------------------------------------------------------------------------
+
+- name: Get brick device FSTYPE (whole device)
   ansible.builtin.command: "blkid -s TYPE -o value {{ gluster_brick_device }}"
-  register: _brick_fs
+  register: _brick_fstype_raw
   changed_when: false
   failed_when: false
 
-- name: Create XFS filesystem on the USB drive (only if blank)
+- name: Get brick device LABEL (whole device)
+  ansible.builtin.command: "blkid -s LABEL -o value {{ gluster_brick_device }}"
+  register: _brick_label_raw
+  changed_when: false
+  failed_when: false
+
+- name: List mountpoints currently using {{ gluster_brick_device }} or its partitions
+  ansible.builtin.shell: |
+    findmnt -nlo SOURCE,TARGET | awk '$1 ~ "^{{ gluster_brick_device }}" {print $2}'
+  args:
+    executable: /bin/bash
+  register: _brick_mounts
+  changed_when: false
+
+- name: Decide if the brick needs (re)formatting
+  ansible.builtin.set_fact:
+    _brick_needs_format: >-
+      {{ (_brick_fstype_raw.stdout | trim) != 'xfs'
+         or not (_brick_label_raw.stdout | trim).startswith('gbrick-') }}
+
+- name: Unmount any partitions/mounts of {{ gluster_brick_device }}
+  ansible.builtin.command: "umount {{ item }}"
+  loop: "{{ _brick_mounts.stdout_lines }}"
+  when:
+    - _brick_needs_format
+    - _brick_mounts.stdout_lines | length > 0
+  changed_when: true
+  failed_when: false
+
+- name: Wipe signatures + partition table on the brick device
+  ansible.builtin.command: "wipefs --all --force {{ gluster_brick_device }}"
+  when: _brick_needs_format
+  changed_when: true
+
+- name: Re-read partition table after wipe
+  ansible.builtin.command: "partprobe {{ gluster_brick_device }}"
+  when: _brick_needs_format
+  changed_when: false
+  failed_when: false
+
+- name: Create XFS filesystem on the USB drive
   community.general.filesystem:
     fstype: xfs
     dev: "{{ gluster_brick_device }}"
     # XFS labels are limited to 12 characters - keep it short.
     opts: "-i size=512 -L gbrick-{{ gluster_brick_id }}"
-  when: _brick_fs.stdout | trim == ""
+    force: true
+  when: _brick_needs_format
 
 - name: Ensure brick mount directory exists
   ansible.builtin.file:
