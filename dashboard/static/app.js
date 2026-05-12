@@ -6,10 +6,6 @@
   const els = {
     connection: document.getElementById("connection"),
     clock: document.getElementById("clock"),
-    statHosts: document.getElementById("stat-hosts"),
-    statPods: document.getElementById("stat-pods"),
-    statStorage: document.getElementById("stat-storage"),
-    statModels: document.getElementById("stat-models"),
     hosts: document.getElementById("hosts"),
     cluster: document.getElementById("cluster"),
     apps: document.getElementById("apps"),
@@ -76,15 +72,11 @@
           <span class="val">${fmtUptime(h.uptime_seconds)}</span></div>
       </div>`).join("");
     els.hosts.innerHTML = html;
-
-    const upCount = hosts.filter((h) => h.up).length;
-    setText(els.statHosts, `${upCount} / ${hosts.length}`);
   }
 
   function renderCluster(c) {
     if (!c || !c.nodes || c.nodes.length === 0) {
       els.cluster.innerHTML = `<div class="empty">Cluster not reachable yet.</div>`;
-      setText(els.statPods, "—");
       return;
     }
     els.cluster.innerHTML = c.nodes.map((n) => `
@@ -94,7 +86,6 @@
         </div>
         <div class="det">${escape(n.version || "")}<br/>${escape(n.arch || "")}</div>
       </div>`).join("");
-    setText(els.statPods, `${c.pods_running} / ${c.pods_total}`);
   }
 
   function renderApps(apps) {
@@ -119,7 +110,6 @@
   function renderStorage(s) {
     if (!s || !s.total_bytes) {
       els.storage.innerHTML = `<div class="empty">Storage volume not mounted yet.</div>`;
-      setText(els.statStorage, "—");
       return;
     }
     const pct = s.used_percent;
@@ -140,7 +130,6 @@
           <div class="sub">${fmtBytes(s.free_bytes)} free</div>
         </div>
       </div>`;
-    setText(els.statStorage, `${pct.toFixed(0)}%`);
   }
 
   function renderServices(svcs) {
@@ -156,7 +145,6 @@
   function renderAi(ai) {
     if (!ai) {
       els.ai.innerHTML = `<div class="empty">AI node not reachable.</div>`;
-      setText(els.statModels, "—");
       return;
     }
     const status = ai.ok
@@ -167,7 +155,6 @@
     els.ai.innerHTML = `
       <div class="ai-head">${status}<span class="dt">${escape(ai.url || "")}</span></div>
       <div class="models">${models}</div>`;
-    setText(els.statModels, (ai.models || []).length || "0");
   }
 
   function renderSnapshot(snap) {
