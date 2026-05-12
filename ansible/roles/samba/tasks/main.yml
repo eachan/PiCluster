@@ -141,21 +141,55 @@
   notify:
     - restart samba
 
-- name: Disable default smbd/nmbd so CTDB manages them
-  ansible.builtin.systemd:
-    name: "{{ item }}"
-    enabled: false
-    state: stopped
-  loop:
-    - smbd
-    - nmbd
-  failed_when: false
+# Make sure smbd starts AFTER CTDB (so CTDB's tdb sockets are ready) and
+# is restarted whenever CTDB restarts.
+- name: smbd systemd drop-in - order after ctdb
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/smbd.service.d/ctdb-order.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      After=ctdb.service network-online.target
+      Requires=ctdb.service
+  notify: restart samba
 
-- name: Enable + start CTDB (manages smbd/nmbd via CTDB events)
+- name: Reload systemd to pick up smbd drop-in
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Enable + start CTDB
   ansible.builtin.systemd:
     name: ctdb
     enabled: true
     state: started
+
+- name: Wait for CTDB to be healthy
+  ansible.builtin.shell: |
+    set -e
+    for i in $(seq 1 30); do
+      if sudo ctdb status 2>/dev/null | grep -q 'Recovery mode:NORMAL'; then
+        exit 0
+      fi
+      sleep 2
+    done
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+
+- name: Enable + start smbd / nmbd (CTDB integration is via clustering=yes
+       in smb.conf, not via CTDB event scripts)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - smbd
+    - nmbd
 
 - name: UFW - allow SMB + CTDB ports
   community.general.ufw:
