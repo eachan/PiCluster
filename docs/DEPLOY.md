@@ -47,6 +47,35 @@ metadata:
     picluster.dashboard/description: "Short blurb the UI will show"
 ```
 
+### Giving an app its own floating LAN IP (VIP)
+
+MetalLB runs on the cluster and hands out IPs from the pool defined in
+`metallb_address_pool` (`group_vars/all.yml`). To give an app a stable LAN
+IP that floats between nodes:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  namespace: apps
+  annotations:
+    # Must lie inside metallb_address_pool.
+    metallb.universe.tf/loadBalancerIPs: "192.168.1.52"
+spec:
+  type: LoadBalancer
+  selector:
+    app: my-app
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+When the node hosting the VIP fails, MetalLB elects a new node within a
+few seconds, sends gratuitous ARP, and traffic resumes. The backing pod
+may also fail over (Kubernetes reschedules it within ~30s); kube-proxy
+handles bridging the VIP to whichever node the pod ends up on.
+
 The first example app is `apps/openwebui/` - see its README for layout
 conventions you can copy.
 

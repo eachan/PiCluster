@@ -5,14 +5,17 @@ as the first user-facing app on the K3s cluster.
 
 ## URL
 
-| Audience      | URL                            |
-| ------------- | ------------------------------ |
-| LAN users     | `http://node-1:30080`          |
-|               | `http://node-2:30080`          |
-|               | `http://node-3:30080`          |
+| Audience      | URL                       | Notes                                  |
+| ------------- | ------------------------- | -------------------------------------- |
+| LAN users     | `http://192.168.1.51`     | **Primary.** MetalLB-managed floating VIP - automatically follows whichever cluster node is up. |
+| Fallback      | `http://node-1:30080`     | NodePort - works on `node-2` / `node-3` too if you need a specific node. |
 
-(Any of the three works - if one node is down, just use another. NodePort
-routes traffic to whichever pod is running.)
+The VIP (`192.168.1.51`) is allocated from the MetalLB pool defined in
+`ansible/inventory/group_vars/all.yml` (`metallb_address_pool`). It uses
+gratuitous ARP - one node "owns" the IP at any time and answers for it;
+when that node fails another node takes over within a few seconds. To
+change the VIP, edit the `metallb.universe.tf/loadBalancerIPs` annotation
+in `manifest.yaml` (it must lie within `metallb_address_pool`).
 
 ## First login
 

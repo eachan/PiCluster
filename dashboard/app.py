@@ -332,10 +332,20 @@ async def _collect_apps() -> list[dict[str, Any]]:
         annotations = s.get("metadata", {}).get("annotations", {}) or {}
         title = annotations.get("picluster.dashboard/title") or s["metadata"]["name"]
         description = annotations.get("picluster.dashboard/description") or ""
-        if node_port:
-            endpoint_url = f"http://{primary_host}:{node_port}"
+        ingress = (s.get("status", {}).get("loadBalancer", {}).get("ingress") or [])
+        lb_ip = ingress[0].get("ip") if ingress and isinstance(ingress[0], dict) else None
+
+        def _http(host: str, p: int | None) -> str:
+            if not host or not p:
+                return ""
+            return f"http://{host}" if p == 80 else f"http://{host}:{p}"
+
+        if lb_ip:
+            endpoint_url = _http(lb_ip, port)
+        elif node_port:
+            endpoint_url = _http(primary_host, node_port)
         elif spec.get("clusterIP") and port:
-            endpoint_url = f"http://{spec['clusterIP']}:{port}"
+            endpoint_url = _http(spec["clusterIP"], port)
         else:
             endpoint_url = ""
         apps.append({
@@ -345,6 +355,7 @@ async def _collect_apps() -> list[dict[str, Any]]:
             "description": description,
             "type": spec.get("type"),
             "cluster_ip": spec.get("clusterIP"),
+            "lb_ip": lb_ip,
             "port": port,
             "node_port": node_port,
             "endpoint_url": endpoint_url,

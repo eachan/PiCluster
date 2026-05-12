@@ -133,8 +133,13 @@ metadata:
     # Friendly label the dashboard can display.
     picluster.dashboard/title: "Open WebUI"
     picluster.dashboard/description: "Chat UI for Ollama"
+    # MetalLB will hand this fixed LAN IP to the service. It floats between
+    # whichever cluster nodes are up - the equivalent of a CTDB VIP.
+    metallb.universe.tf/loadBalancerIPs: "192.168.1.51"
 spec:
-  type: NodePort
+  type: LoadBalancer
+  # NodePort 30080 is still allocated as a fallback (node-X:30080 keeps
+  # working if MetalLB has issues).
   selector:
     app: openwebui
   ports:
@@ -142,3 +147,7 @@ spec:
       port: 80
       targetPort: 8080
       nodePort: 30080
+  # Cluster mode means any node can answer ARP for the VIP and forward to
+  # whichever node currently runs the pod. Trades source-IP preservation
+  # for resilience, which is what we want here.
+  externalTrafficPolicy: Cluster

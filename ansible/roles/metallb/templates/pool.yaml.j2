@@ -1,0 +1,22 @@
+---
+# Pool of LAN IPs MetalLB can hand out to LoadBalancer Services.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: lan-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - "{{ metallb_address_pool }}"
+  autoAssign: true
+---
+# Advertise those IPs on the LAN using gratuitous ARP. One node "owns" each
+# IP at any time and answers ARP for it; on failure another node takes over.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: lan-pool
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - lan-pool

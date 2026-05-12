@@ -1,0 +1,63 @@
+---
+# Install MetalLB in L2 mode and configure an IPAddressPool drawn from the
+# LAN. This gives apps a floating IP that fails over between cluster nodes,
+# the K8s-native equivalent of the Samba CTDB VIP.
+
+- name: Confirm kubeconfig is present on supervisor
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: _kubeconfig
+  failed_when: not _kubeconfig.stat.exists
+
+- name: Install MetalLB manifests
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} apply
+    -f https://raw.githubusercontent.com/metallb/metallb/v{{ metallb_version }}/config/manifests/metallb-native.yaml
+  register: _metallb_apply
+  changed_when: >-
+    'configured' in _metallb_apply.stdout
+    or 'created' in _metallb_apply.stdout
+
+- name: Wait for MetalLB IPAddressPool CRD to be Established
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }}
+    wait --for=condition=Established --timeout=120s
+    crd/ipaddresspools.metallb.io crd/l2advertisements.metallb.io
+  changed_when: false
+
+- name: Wait for MetalLB controller to be Available
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+    wait --for=condition=available --timeout=300s deployment/controller
+  changed_when: false
+
+- name: Wait for MetalLB speaker DaemonSet pods to be Ready
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+    rollout status daemonset/speaker --timeout=300s
+  changed_when: false
+
+- name: Ensure local cache dir exists for rendered manifests
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.cache/picluster"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Render IPAddressPool + L2Advertisement manifest
+  ansible.builtin.template:
+    src: pool.yaml.j2
+    dest: "/home/{{ ansible_user }}/.cache/picluster/metallb-pool.yaml"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+
+- name: Apply IPAddressPool + L2Advertisement
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} apply
+    -f /home/{{ ansible_user }}/.cache/picluster/metallb-pool.yaml
+  register: _pool_apply
+  changed_when: >-
+    'configured' in _pool_apply.stdout
+    or 'created' in _pool_apply.stdout

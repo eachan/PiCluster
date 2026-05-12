@@ -1,0 +1,9 @@
+---
+# Install MetalLB on the cluster. Runs from the supervisor because that's
+# where the kubeconfig lives.
+- name: Install and configure MetalLB
+  hosts: supervisor
+  gather_facts: false
+  tags: [metallb, lb]
+  roles:
+    - metallb

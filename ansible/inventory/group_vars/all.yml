@@ -81,6 +81,22 @@ ctdb_nodes:
   - "192.168.1.162"
 
 # ---------------------------------------------------------------------------
+# MetalLB - gives apps a floating LAN IP (the equivalent of a VIP) that
+# follows whichever cluster node currently has the backing pod.
+# Pick a small range of unused LAN addresses. Make sure your router's DHCP
+# scope is set so it never hands these out.
+# ---------------------------------------------------------------------------
+metallb_version: "0.14.8"
+metallb_address_pool: "192.168.1.51-192.168.1.59"
+# Per-app VIPs assigned out of the pool above. Bake into the relevant
+# Kubernetes manifests via the metallb.universe.tf/loadBalancerIPs annotation.
+openwebui_vip: "192.168.1.51"
+
+# Kubeconfig copied to the supervisor by the dashboard role. Re-used by
+# everything that needs to drive kubectl from the supervisor.
+kubeconfig_path: "/home/{{ ansible_user }}/.kube/config"
+
+# ---------------------------------------------------------------------------
 # Monitoring (Prometheus + Grafana)
 # ---------------------------------------------------------------------------
 prometheus_version: "2.53.0"
