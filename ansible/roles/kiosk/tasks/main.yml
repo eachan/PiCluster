@@ -1,85 +1,79 @@
 ---
-# Auto-start a fullscreen Chromium pointing at the dashboard on HDMI0.
-# Works on Raspberry Pi OS Bookworm (Wayland/labwc) and earlier X11/openbox.
+# Auto-launch the PiCluster dashboard fullscreen on the supervisor's HDMI
+# display. We DON'T try to replace the Pi's normal desktop session - we just
+# add an autostart entry that runs Chromium in kiosk mode after login.
+#
+# Works on Pi OS Bookworm (Wayland/labwc), Bookworm/wayfire, and X11 sessions.
 
-- name: Install kiosk packages
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+- name: Install Chromium (Pi OS package name)
   ansible.builtin.apt:
-    name:
-      - chromium-browser
-      - unclutter             # hide the mouse cursor when idle
-      - xserver-xorg
-      - x11-xserver-utils
-      - xinit
-      - openbox
-      - lightdm
+    name: chromium-browser
     state: present
-  failed_when: false   # chromium-browser package name varies by release
+  register: _chromium_pi
+  failed_when: false
 
-- name: Install Chromium fallback (Debian package name)
+- name: Install Chromium (Debian package name) fallback
   ansible.builtin.apt:
     name: chromium
     state: present
+  when: _chromium_pi.failed | default(false)
   failed_when: false
 
-- name: Ensure SSH user can run X
-  ansible.builtin.user:
-    name: "{{ ansible_user }}"
-    groups: video,tty,input,render
-    append: true
+- name: Install unclutter for hiding the mouse cursor (X11 only - harmless if absent)
+  ansible.builtin.apt:
+    name: unclutter
+    state: present
+  failed_when: false
 
 # ---------------------------------------------------------------------------
-# Configure LightDM for automatic login of the eachan user.
+# Kiosk launcher script
 # ---------------------------------------------------------------------------
-- name: Configure LightDM auto-login
+- name: Install /usr/local/bin/picluster-kiosk launcher
   ansible.builtin.copy:
-    dest: /etc/lightdm/lightdm.conf.d/50-picluster-autologin.conf
+    dest: /usr/local/bin/picluster-kiosk
     owner: root
     group: root
-    mode: "0644"
-    content: |
-      [Seat:*]
-      autologin-user={{ ansible_user }}
-      autologin-user-timeout=0
-      user-session=openbox
-  failed_when: false
-
-- name: Ensure openbox autostart directory exists
-  ansible.builtin.file:
-    path: "/home/{{ ansible_user }}/.config/openbox"
-    state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: "0755"
-
-- name: Write openbox autostart that launches Chromium kiosk
-  ansible.builtin.copy:
-    dest: "/home/{{ ansible_user }}/.config/openbox/autostart"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
     mode: "0755"
     content: |
       #!/bin/sh
-      # PiCluster kiosk session
+      # Launches Chromium fullscreen on the PiCluster dashboard.
+      # Restarts itself if Chromium exits (until the user kills it cleanly).
 
-      # Disable screen blanking + power saving on HDMI0
-      xset -dpms
-      xset s off
-      xset s noblank
+      # X11-only: disable DPMS / screen blanking. Silently ignored on Wayland.
+      xset -dpms     2>/dev/null || true
+      xset s off     2>/dev/null || true
+      xset s noblank 2>/dev/null || true
 
-      # Hide cursor when idle for 2 seconds
-      unclutter -idle 2 -root &
+      # Hide the cursor when idle (X11 only; on Wayland labwc/wayfire handle
+      # the cursor themselves).
+      if command -v unclutter >/dev/null 2>&1; then
+        pgrep -x unclutter >/dev/null || unclutter -idle 2 -root &
+      fi
 
-      # Pick chromium binary
+      # Pick whatever Chromium binary the OS has installed.
       CHROMIUM="$(command -v chromium-browser || command -v chromium)"
+      if [ -z "$CHROMIUM" ]; then
+        echo "picluster-kiosk: no chromium binary found" >&2
+        exit 1
+      fi
 
-      # Restore any clean exit flags so chromium doesn't show the warning bar
-      sed -i 's/"exited_cleanly":false/"exited_cleanly":true/' \
-        "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
-      sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' \
-        "$HOME/.config/chromium/Default/Preferences" 2>/dev/null || true
+      # Clear any "Chromium didn't shut down cleanly" warning so the kiosk
+      # never shows a bubble bar on the next start.
+      PREFS_FILE="$HOME/.config/chromium-kiosk/Default/Preferences"
+      if [ -f "$PREFS_FILE" ]; then
+        sed -i \
+          -e 's/"exited_cleanly":false/"exited_cleanly":true/' \
+          -e 's/"exit_type":"Crashed"/"exit_type":"Normal"/' \
+          "$PREFS_FILE" || true
+      fi
 
-      # Launch fullscreen kiosk
-      while true ; do
+      DASHBOARD_URL="${PICLUSTER_DASHBOARD_URL:-http://localhost/}"
+
+      # Loop: if Chromium dies for any reason, relaunch after a short pause.
+      while true; do
         "$CHROMIUM" \
           --kiosk \
           --noerrdialogs \
@@ -88,32 +82,108 @@
           --disable-features=TranslateUI \
           --check-for-update-interval=31536000 \
           --no-first-run \
-          --start-fullscreen \
-          --window-position=0,0 \
+          --password-store=basic \
           --user-data-dir="$HOME/.config/chromium-kiosk" \
-          --app=http://localhost/
+          --app="$DASHBOARD_URL"
         sleep 5
       done
 
-- name: Detect cmdline.txt location
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  loop:
-    - /boot/firmware/cmdline.txt
-    - /boot/cmdline.txt
-  register: _kiosk_cmdline_stat
+# ---------------------------------------------------------------------------
+# Wire the launcher into autostart in every place the Pi might look
+# ---------------------------------------------------------------------------
+- name: Ensure user XDG autostart directory exists
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.config/autostart"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
 
-- name: Ensure HDMI0 is preferred output (cmdline)
-  ansible.builtin.replace:
-    path: "{{ (_kiosk_cmdline_stat.results | selectattr('stat.exists') | list | first).stat.path }}"
-    regexp: '^(?!.*video=HDMI-A-1)(.*)$'
-    replace: '\1 video=HDMI-A-1:1920x1080@60'
-  when: (_kiosk_cmdline_stat.results | selectattr('stat.exists') | list | length) > 0
+- name: XDG autostart entry (covers X11 LXDE + Wayland labwc + wayfire)
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/.config/autostart/picluster-kiosk.desktop"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name=PiCluster Kiosk
+      Comment=Fullscreen Chromium pointed at the dashboard
+      Exec=/usr/local/bin/picluster-kiosk
+      Terminal=false
+      X-GNOME-Autostart-enabled=true
+      X-LXQt-Autostart-enabled=true
+      NoDisplay=false
+
+# labwc (Pi OS Bookworm 2024-10+ default) reads autostart from this file.
+- name: Ensure labwc config dir
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.config/labwc"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: labwc autostart launches kiosk
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/.config/labwc/autostart"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      /usr/local/bin/picluster-kiosk &
+
+# wayfire (older Bookworm releases) reads autostart from wayfire.ini.
+- name: Ensure wayfire config exists
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.config/wayfire.ini"
+    state: touch
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+
+- name: wayfire autostart launches kiosk
+  ansible.builtin.blockinfile:
+    path: "/home/{{ ansible_user }}/.config/wayfire.ini"
+    marker: "# {mark} PICLUSTER KIOSK"
+    block: |
+      [autostart]
+      picluster_kiosk = /usr/local/bin/picluster-kiosk
+
+# ---------------------------------------------------------------------------
+# Disable screen blanking so the dashboard stays visible 24/7
+# ---------------------------------------------------------------------------
+- name: Ensure raspi-config is installed (for blanking control)
+  ansible.builtin.apt:
+    name: raspi-config
+    state: present
   failed_when: false
 
-- name: Enable LightDM service (graphical target)
-  ansible.builtin.systemd:
-    name: lightdm
-    enabled: true
-    state: started
+- name: Disable screen blanking via raspi-config
+  ansible.builtin.command: raspi-config nonint do_blanking 1
+  changed_when: false
   failed_when: false
+
+# ---------------------------------------------------------------------------
+# Auto-login at desktop (the Pi-native way - won't disturb whatever
+# display/session manager the OS image is using)
+# ---------------------------------------------------------------------------
+- name: Enable desktop auto-login (raspi-config B4)
+  ansible.builtin.command: raspi-config nonint do_boot_behaviour B4
+  changed_when: false
+  failed_when: false
+
+# ---------------------------------------------------------------------------
+# Reminder
+# ---------------------------------------------------------------------------
+- name: Show how to apply the kiosk without rebooting
+  ansible.builtin.debug:
+    msg: >-
+      Kiosk autostart installed. It will run on the next login.
+      To launch it now without rebooting, run on the supervisor as eachan:
+        DISPLAY=:0 /usr/local/bin/picluster-kiosk &
+      Or just `sudo reboot`.
