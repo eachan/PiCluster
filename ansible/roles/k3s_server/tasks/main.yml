@@ -93,13 +93,30 @@
   ansible.builtin.command: iptables -P FORWARD ACCEPT
   changed_when: false
 
-- name: UFW - allow pod and service CIDRs (K3s overlay)
+- name: UFW - allow pod and service CIDRs (INPUT)
   community.general.ufw:
     rule: allow
     src: "{{ item }}"
   loop:
     - "10.42.0.0/16"   # K3s pod CIDR
     - "10.43.0.0/16"   # K3s service CIDR
+  ignore_errors: true
+
+# Belt-and-suspenders: even with FORWARD policy=ACCEPT, UFW's
+# ufw-reject-forward / ufw-before-forward chains can drop traffic before
+# the default policy is consulted. Explicit `route allow` rules land in
+# ufw-user-forward and short-circuit those rejects for K3s overlay traffic.
+- name: UFW - allow forwarded K3s overlay traffic (route rules)
+  community.general.ufw:
+    rule: allow
+    route: true
+    src: "{{ item.src }}"
+    dest: "{{ item.dst }}"
+  loop:
+    - { src: "10.42.0.0/16", dst: "any" }
+    - { src: "any",          dst: "10.42.0.0/16" }
+    - { src: "10.43.0.0/16", dst: "any" }
+    - { src: "any",          dst: "10.43.0.0/16" }
   ignore_errors: true
 
 # ---------------------------------------------------------------------------
