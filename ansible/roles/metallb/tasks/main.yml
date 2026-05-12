@@ -25,17 +25,79 @@
     crd/ipaddresspools.metallb.io crd/l2advertisements.metallb.io
   changed_when: false
 
-- name: Wait for MetalLB controller to be Available
-  ansible.builtin.command: >-
-    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
-    wait --for=condition=available --timeout=300s deployment/controller
-  changed_when: false
+# On a fresh deploy the ARM64 controller + speaker images (~150MB combined)
+# are pulled from quay.io, which is slow on a Pi. We give it up to 10 min,
+# and on failure dump diagnostics so we can see exactly why.
+- name: Wait for MetalLB to become Ready (with diagnostics on failure)
+  block:
+    - name: Wait for MetalLB controller to be Available
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+        wait --for=condition=available --timeout=600s deployment/controller
+      changed_when: false
 
-- name: Wait for MetalLB speaker DaemonSet pods to be Ready
-  ansible.builtin.command: >-
-    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
-    rollout status daemonset/speaker --timeout=300s
-  changed_when: false
+    - name: Wait for MetalLB speaker DaemonSet pods to be Ready
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+        rollout status daemonset/speaker --timeout=600s
+      changed_when: false
+
+  rescue:
+    - name: Collect MetalLB pod overview
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system get pods -o wide
+      register: _ml_pods
+      changed_when: false
+      failed_when: false
+
+    - name: Collect MetalLB recent events
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+        get events --sort-by=.lastTimestamp
+      register: _ml_events
+      changed_when: false
+      failed_when: false
+
+    - name: Describe MetalLB controller deployment
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+        describe deployment/controller
+      register: _ml_ctrl_desc
+      changed_when: false
+      failed_when: false
+
+    - name: Describe MetalLB speaker DaemonSet
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+        describe daemonset/speaker
+      register: _ml_spk_desc
+      changed_when: false
+      failed_when: false
+
+    - name: Show MetalLB diagnostics
+      ansible.builtin.debug:
+        msg: |
+          MetalLB did not become Ready in time. Diagnostics follow.
+
+          ===================== PODS =====================
+          {{ _ml_pods.stdout | default('(none)') }}
+
+          ===================== EVENTS ===================
+          {{ _ml_events.stdout | default('(none)') }}
+
+          ============== deploy/controller ==============
+          {{ _ml_ctrl_desc.stdout | default('(none)') }}
+
+          ============== ds/speaker =====================
+          {{ _ml_spk_desc.stdout | default('(none)') }}
+
+    - name: Fail loudly with hint
+      ansible.builtin.fail:
+        msg: |-
+          MetalLB controller/speaker did not become Ready within 10 min.
+          See the diagnostic dump immediately above for the real cause.
+          Most common: still pulling images on a slow connection - just
+          re-run `piclusterctl deploy` once the pull completes.
 
 - name: Ensure local cache dir exists for rendered manifests
   ansible.builtin.file:
