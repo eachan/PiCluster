@@ -49,102 +49,12 @@
     - { name: ip6tables, path: /usr/sbin/ip6tables-legacy }
   ignore_errors: true
 
-- name: UFW - allow K3s API + Flannel VXLAN + Kubelet metrics
-  community.general.ufw:
-    rule: allow
-    port: "{{ item.port }}"
-    proto: "{{ item.proto }}"
-  loop:
-    - { port: "6443",  proto: tcp }   # K3s API
-    - { port: "10250", proto: tcp }   # Kubelet
-    - { port: "8472",  proto: udp }   # Flannel VXLAN
-    - { port: "2379:2380", proto: tcp } # etcd
-  ignore_errors: true
-
-# K3s pods talk to each other and to the API service (10.43.0.1) through
-# the FORWARD chain when the chosen endpoint is on a remote node. UFW's
-# default forward policy is DROP, which silently breaks all pod -> service
-# traffic that doesn't happen to land locally. Two corrections:
-#   1. Switch UFW's default forward policy to ACCEPT (safe here - cluster
-#      nodes aren't acting as gateway routers for anything else).
-#   2. Explicitly allow traffic originating from the pod and service CIDRs.
-- name: UFW - default forward policy ACCEPT (required by K3s overlay)
-  ansible.builtin.lineinfile:
-    path: /etc/default/ufw
-    regexp: '^DEFAULT_FORWARD_POLICY='
-    line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
-  register: _ufw_forward_policy
-
-# `ufw reload` does NOT re-read /etc/default/ufw on older UFW versions, so we
-# disable -> enable to guarantee the new forward policy is applied to the
-# in-memory iptables chain. While we're at it, set the live policy directly
-# so the cluster heals immediately without waiting for the next reboot.
-- name: Bounce UFW to apply the new forward policy
-  when: _ufw_forward_policy.changed
-  block:
-    - name: UFW - disable
-      community.general.ufw:
-        state: disabled
-    - name: UFW - enable
-      community.general.ufw:
-        state: enabled
-
-- name: Set iptables FORWARD chain policy to ACCEPT (immediate)
-  ansible.builtin.command: iptables -P FORWARD ACCEPT
-  changed_when: false
-
-- name: UFW - allow pod and service CIDRs (INPUT)
-  community.general.ufw:
-    rule: allow
-    src: "{{ item }}"
-  loop:
-    - "10.42.0.0/16"   # K3s pod CIDR
-    - "10.43.0.0/16"   # K3s service CIDR
-  ignore_errors: true
-
-# Belt-and-suspenders: even with FORWARD policy=ACCEPT, UFW's
-# ufw-reject-forward / ufw-before-forward chains can drop traffic before
-# the default policy is consulted. Explicit `route allow` rules land in
-# ufw-user-forward and short-circuit those rejects for K3s overlay traffic.
-- name: UFW - allow forwarded K3s overlay traffic (route rules)
-  community.general.ufw:
-    rule: allow
-    route: true
-    src: "{{ item.src }}"
-    dest: "{{ item.dst }}"
-  loop:
-    - { src: "10.42.0.0/16", dst: "any" }
-    - { src: "any",          dst: "10.42.0.0/16" }
-    - { src: "10.43.0.0/16", dst: "any" }
-    - { src: "any",          dst: "10.43.0.0/16" }
-  register: _ufw_route_rules
-  ignore_errors: true
-
-# If UFW was just reconfigured, any pods that were stuck in CrashLoopBackOff
-# (because they couldn't reach the API service through the old broken FORWARD
-# chain) won't retry quickly - their backoff timer can be up to 5 min. Nudge
-# the core kube-system workloads to roll fresh pods that pick up the now-
-# working networking immediately. Idempotent: if pods are healthy, rollout
-# restart just does a clean rolling update with no real downtime.
-- name: Force kube-system core workloads to restart after UFW changes
-  when:
-    - inventory_hostname == groups['cluster'][0]
-    - >-
-      _ufw_forward_policy.changed
-      or (_ufw_route_rules.results | default([]) | selectattr('changed', 'equalto', true) | list | length > 0)
-  block:
-    - name: Get list of kube-system deployments that exist
-      ansible.builtin.shell: >-
-        k3s kubectl -n kube-system get deploy -o name 2>/dev/null || true
-      register: _kubesys_deploys
-      changed_when: false
-
-    - name: Rollout restart each kube-system deployment
-      ansible.builtin.command: "k3s kubectl -n kube-system rollout restart {{ item }}"
-      loop: "{{ _kubesys_deploys.stdout_lines }}"
-      when: _kubesys_deploys.stdout_lines | length > 0
-      changed_when: true
-      failed_when: false
+# NOTE: UFW is intentionally disabled on cluster nodes (see common role).
+# K3s manages all its own iptables rules via Flannel + kube-router +
+# kube-proxy and the iptables-legacy/iptables-nft split on Pi OS Bookworm
+# makes UFW + K3s fight each other on different backends - pods silently
+# can't reach the API service. We let K3s own the firewall on these nodes.
+# (The iptables-legacy alternatives above are still relevant for K3s itself.)
 
 # ---------------------------------------------------------------------------
 # Install k3s
@@ -206,6 +116,29 @@
     port: 6443
     delay: 5
     timeout: 180
+
+# Heal any kube-system pods left in CrashLoopBackOff by previous broken
+# firewall configurations. With UFW now disabled on cluster nodes the
+# networking is correct, but pods that were already wedged need a nudge
+# instead of waiting out their (up to 5 min) exponential backoff. Idempotent
+# - if everything is already healthy, rollout restart just does a clean
+# rolling update at negligible cost.
+- name: Force kube-system core workloads to restart (heal stuck pods)
+  when: _is_bootstrap
+  block:
+    - name: Get list of kube-system deployments that exist
+      ansible.builtin.shell: >-
+        k3s kubectl -n kube-system get deploy -o name 2>/dev/null || true
+      register: _kubesys_deploys
+      changed_when: false
+      failed_when: false
+
+    - name: Rollout restart each kube-system deployment
+      ansible.builtin.command: "k3s kubectl -n kube-system rollout restart {{ item }}"
+      loop: "{{ _kubesys_deploys.stdout_lines | default([]) }}"
+      when: _kubesys_deploys.stdout_lines | default([]) | length > 0
+      changed_when: true
+      failed_when: false
 
 # ---------------------------------------------------------------------------
 # Convenience: copy kubeconfig to ~/.kube/config for the SSH user, and to

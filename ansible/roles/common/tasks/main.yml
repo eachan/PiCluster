@@ -62,37 +62,70 @@
     group: "{{ ansible_user }}"
     mode: "0755"
 
-# A simple, permissive baseline firewall: allow SSH from anywhere, deny new
-# inbound by default, allow all from LAN subnet 192.168.0.0/16 (cluster
-# traffic, Samba, K3s, Prometheus). Adjust LAN range in group_vars if needed.
-- name: UFW - default deny incoming
-  community.general.ufw:
-    direction: incoming
-    policy: deny
-  ignore_errors: true
+# Firewall configuration.
+#
+# UFW is enabled on the supervisor + AI nodes (the real security perimeter)
+# but EXPLICITLY DISABLED on cluster nodes. Reason: K3s manages its own
+# iptables rules (Flannel + kube-router + kube-proxy) and Pi OS Bookworm
+# ships an iptables-nft / iptables-legacy split that causes UFW and K3s to
+# operate on different backends. With UFW running, pod-to-service traffic
+# (e.g. pods reaching the API service at 10.43.0.1) gets silently dropped
+# even with a permissive policy + route-allow rules.
+#
+# Cluster nodes are on a private LAN behind a router NAT and only run
+# trusted services (K3s, Samba, node_exporter). The supervisor's UFW + the
+# upstream router are the actual security perimeter.
+- name: Configure UFW (non-cluster hosts only)
+  when: inventory_hostname not in groups.get('cluster', [])
+  block:
+    - name: UFW - default deny incoming
+      community.general.ufw:
+        direction: incoming
+        policy: deny
+      ignore_errors: true
 
-- name: UFW - default allow outgoing
-  community.general.ufw:
-    direction: outgoing
-    policy: allow
-  ignore_errors: true
+    - name: UFW - default allow outgoing
+      community.general.ufw:
+        direction: outgoing
+        policy: allow
+      ignore_errors: true
 
-- name: UFW - allow SSH
-  community.general.ufw:
-    rule: allow
-    name: OpenSSH
-  ignore_errors: true
+    - name: UFW - allow SSH
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+      ignore_errors: true
 
-- name: UFW - allow LAN subnet
-  community.general.ufw:
-    rule: allow
-    src: "{{ lan_cidr | default('192.168.0.0/16') }}"
-  ignore_errors: true
+    - name: UFW - allow LAN subnet
+      community.general.ufw:
+        rule: allow
+        src: "{{ lan_cidr | default('192.168.0.0/16') }}"
+      ignore_errors: true
 
-- name: UFW - enable
-  community.general.ufw:
-    state: enabled
-  ignore_errors: true
+    - name: UFW - enable
+      community.general.ufw:
+        state: enabled
+      ignore_errors: true
+
+- name: Ensure UFW is fully disabled on cluster nodes (K3s manages iptables)
+  when: inventory_hostname in groups.get('cluster', [])
+  block:
+    - name: UFW - reset (cluster nodes)
+      community.general.ufw:
+        state: reset
+      ignore_errors: true
+
+    - name: UFW - disable (cluster nodes)
+      community.general.ufw:
+        state: disabled
+      ignore_errors: true
+
+    - name: ufw.service - mask so it doesn't auto-start on reboot
+      ansible.builtin.systemd:
+        name: ufw
+        enabled: false
+        state: stopped
+      ignore_errors: true
 
 # node_exporter on every host so Prometheus on the supervisor can scrape it.
 - name: Install node_exporter
