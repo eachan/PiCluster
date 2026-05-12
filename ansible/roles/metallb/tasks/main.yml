@@ -92,15 +92,24 @@
   register: _ctrl_patch
   changed_when: "'patched' in _ctrl_patch.stdout and 'no change' not in _ctrl_patch.stdout"
 
-# If the previous broken pod is wedged in CrashLoopBackOff, the rollout from
-# the patch above can take a long time to clear it. Force-delete it so the
-# new spec gets scheduled immediately.
+# If the previous broken pods are wedged in CrashLoopBackOff or
+# ContainerCreating (waiting on the controller-created memberlist secret),
+# the rollout from the patch above can take a long time to clear them.
+# Force a fresh rollout of both workloads so they pick up the current state
+# (UFW rules, patched probes, etc.) immediately.
 - name: Restart MetalLB controller pods to pick up the probe patch
   ansible.builtin.command: >-
     kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
     rollout restart deployment/controller
   register: _ctrl_restart
   changed_when: "'restarted' in _ctrl_restart.stdout"
+
+- name: Restart MetalLB speaker pods so they re-mount memberlist secret
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+    rollout restart daemonset/speaker
+  register: _spk_restart
+  changed_when: "'restarted' in _spk_restart.stdout"
 
 # ---------------------------------------------------------------------------
 # Wait for MetalLB to come up (with diagnostics on failure).

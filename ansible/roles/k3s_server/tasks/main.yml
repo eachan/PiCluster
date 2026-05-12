@@ -117,7 +117,34 @@
     - { src: "any",          dst: "10.42.0.0/16" }
     - { src: "10.43.0.0/16", dst: "any" }
     - { src: "any",          dst: "10.43.0.0/16" }
+  register: _ufw_route_rules
   ignore_errors: true
+
+# If UFW was just reconfigured, any pods that were stuck in CrashLoopBackOff
+# (because they couldn't reach the API service through the old broken FORWARD
+# chain) won't retry quickly - their backoff timer can be up to 5 min. Nudge
+# the core kube-system workloads to roll fresh pods that pick up the now-
+# working networking immediately. Idempotent: if pods are healthy, rollout
+# restart just does a clean rolling update with no real downtime.
+- name: Force kube-system core workloads to restart after UFW changes
+  when:
+    - inventory_hostname == groups['cluster'][0]
+    - >-
+      _ufw_forward_policy.changed
+      or (_ufw_route_rules.results | default([]) | selectattr('changed', 'equalto', true) | list | length > 0)
+  block:
+    - name: Get list of kube-system deployments that exist
+      ansible.builtin.shell: >-
+        k3s kubectl -n kube-system get deploy -o name 2>/dev/null || true
+      register: _kubesys_deploys
+      changed_when: false
+
+    - name: Rollout restart each kube-system deployment
+      ansible.builtin.command: "k3s kubectl -n kube-system rollout restart {{ item }}"
+      loop: "{{ _kubesys_deploys.stdout_lines }}"
+      when: _kubesys_deploys.stdout_lines | length > 0
+      changed_when: true
+      failed_when: false
 
 # ---------------------------------------------------------------------------
 # Install k3s
