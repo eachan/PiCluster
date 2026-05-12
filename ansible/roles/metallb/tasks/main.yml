@@ -9,6 +9,14 @@
   register: _kubeconfig
   failed_when: not _kubeconfig.stat.exists
 
+- name: Ensure local cache dir exists for rendered manifests
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.cache/picluster"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
 - name: Install MetalLB manifests
   ansible.builtin.command: >-
     kubectl --kubeconfig {{ kubeconfig_path }} apply
@@ -25,9 +33,81 @@
     crd/ipaddresspools.metallb.io crd/l2advertisements.metallb.io
   changed_when: false
 
+# ---------------------------------------------------------------------------
+# Pi-friendly probe patch.
+#
+# MetalLB's stock manifests give the controller a 10s initialDelaySeconds
+# liveness probe. On ARM64 Pi hardware the controller often takes >30s to
+# generate its webhook self-signed cert and start listening, so the stock
+# probe kills it in a tight CrashLoopBackOff before it ever becomes Ready.
+#
+# We patch in:
+#   * a generous startupProbe (gives ~5 min to come up)
+#   * relaxed liveness/readiness (so a single slow probe doesn't kill it)
+# Patch MUST be applied before the readiness wait or the wait will time out
+# while CrashLoopBackOff keeps the controller bouncing.
+# ---------------------------------------------------------------------------
+- name: Render controller probe patch
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/.cache/picluster/metallb-controller-probes.yaml"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    content: |
+      spec:
+        template:
+          spec:
+            containers:
+              - name: controller
+                startupProbe:
+                  httpGet:
+                    path: /metrics
+                    port: monitoring
+                  initialDelaySeconds: 10
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  failureThreshold: 30
+                livenessProbe:
+                  httpGet:
+                    path: /metrics
+                    port: monitoring
+                  initialDelaySeconds: 60
+                  periodSeconds: 30
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+                readinessProbe:
+                  httpGet:
+                    path: /metrics
+                    port: monitoring
+                  initialDelaySeconds: 10
+                  periodSeconds: 10
+                  timeoutSeconds: 3
+                  failureThreshold: 6
+
+- name: Patch MetalLB controller with Pi-friendly probes
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+    patch deployment/controller
+    --patch-file /home/{{ ansible_user }}/.cache/picluster/metallb-controller-probes.yaml
+  register: _ctrl_patch
+  changed_when: "'patched' in _ctrl_patch.stdout and 'no change' not in _ctrl_patch.stdout"
+
+# If the previous broken pod is wedged in CrashLoopBackOff, the rollout from
+# the patch above can take a long time to clear it. Force-delete it so the
+# new spec gets scheduled immediately.
+- name: Restart MetalLB controller pods to pick up the probe patch
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+    rollout restart deployment/controller
+  register: _ctrl_restart
+  changed_when: "'restarted' in _ctrl_restart.stdout"
+
+# ---------------------------------------------------------------------------
+# Wait for MetalLB to come up (with diagnostics on failure).
 # On a fresh deploy the ARM64 controller + speaker images (~150MB combined)
 # are pulled from quay.io, which is slow on a Pi. We give it up to 10 min,
 # and on failure dump diagnostics so we can see exactly why.
+# ---------------------------------------------------------------------------
 - name: Wait for MetalLB to become Ready (with diagnostics on failure)
   block:
     - name: Wait for MetalLB controller to be Available
@@ -66,11 +146,19 @@
       changed_when: false
       failed_when: false
 
-    - name: Describe MetalLB speaker DaemonSet
+    - name: Collect MetalLB controller logs (current attempt)
       ansible.builtin.command: >-
         kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
-        describe daemonset/speaker
-      register: _ml_spk_desc
+        logs deployment/controller --tail=120
+      register: _ml_ctrl_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Collect MetalLB controller logs (previous attempt)
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ kubeconfig_path }} -n metallb-system
+        logs deployment/controller --previous --tail=120
+      register: _ml_ctrl_prev_logs
       changed_when: false
       failed_when: false
 
@@ -85,28 +173,25 @@
           ===================== EVENTS ===================
           {{ _ml_events.stdout | default('(none)') }}
 
-          ============== deploy/controller ==============
-          {{ _ml_ctrl_desc.stdout | default('(none)') }}
+          ============== controller logs (current) =====
+          {{ _ml_ctrl_logs.stdout | default('(none)') }}
 
-          ============== ds/speaker =====================
-          {{ _ml_spk_desc.stdout | default('(none)') }}
+          ============== controller logs (previous) ====
+          {{ _ml_ctrl_prev_logs.stdout | default('(none)') }}
+
+          ============== deploy/controller =============
+          {{ _ml_ctrl_desc.stdout | default('(none)') }}
 
     - name: Fail loudly with hint
       ansible.builtin.fail:
         msg: |-
           MetalLB controller/speaker did not become Ready within 10 min.
           See the diagnostic dump immediately above for the real cause.
-          Most common: still pulling images on a slow connection - just
-          re-run `piclusterctl deploy` once the pull completes.
 
-- name: Ensure local cache dir exists for rendered manifests
-  ansible.builtin.file:
-    path: "/home/{{ ansible_user }}/.cache/picluster"
-    state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: "0755"
-
+# ---------------------------------------------------------------------------
+# Configure the pool. Only safe to apply once the webhook controller is Ready,
+# because IPAddressPool / L2Advertisement are validated by it.
+# ---------------------------------------------------------------------------
 - name: Render IPAddressPool + L2Advertisement manifest
   ansible.builtin.template:
     src: pool.yaml.j2
