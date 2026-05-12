@@ -75,10 +75,23 @@
     line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
   register: _ufw_forward_policy
 
-- name: UFW - reload to pick up forward policy change
-  ansible.builtin.command: ufw reload
+# `ufw reload` does NOT re-read /etc/default/ufw on older UFW versions, so we
+# disable -> enable to guarantee the new forward policy is applied to the
+# in-memory iptables chain. While we're at it, set the live policy directly
+# so the cluster heals immediately without waiting for the next reboot.
+- name: Bounce UFW to apply the new forward policy
   when: _ufw_forward_policy.changed
-  changed_when: true
+  block:
+    - name: UFW - disable
+      community.general.ufw:
+        state: disabled
+    - name: UFW - enable
+      community.general.ufw:
+        state: enabled
+
+- name: Set iptables FORWARD chain policy to ACCEPT (immediate)
+  ansible.builtin.command: iptables -P FORWARD ACCEPT
+  changed_when: false
 
 - name: UFW - allow pod and service CIDRs (K3s overlay)
   community.general.ufw:
