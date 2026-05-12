@@ -20,22 +20,32 @@
 # ---------------------------------------------------------------------------
 # 1. Identify the USB 1 TB disk and prepare it.
 # ---------------------------------------------------------------------------
-- name: Detect candidate USB block devices (non-root, 500GB+)
+- name: Detect candidate USB block devices (500GB+)
   ansible.builtin.shell: |
     set -o pipefail
-    lsblk -dn -o NAME,SIZE,TYPE,TRAN,MOUNTPOINT --bytes \
-      | awk '$3=="disk" && $4=="usb" && $5=="" && $2+0>500000000000 {print "/dev/"$1}'
+    # NB: we deliberately ignore MOUNTPOINT here - on re-runs the brick is
+    # already mounted at {{ gluster_brick_mount }} and we still want to
+    # rediscover it. The TRAN=usb filter already prevents us from picking
+    # the OS root (which on a Pi is mmcblk* or NVMe, never USB).
+    lsblk -dn -o NAME,SIZE,TYPE,TRAN --bytes \
+      | awk '$3=="disk" && $4=="usb" && $2+0>500000000000 {print "/dev/"$1}'
   args:
     executable: /bin/bash
   register: _gluster_candidates
   changed_when: false
+
+- name: Capture full lsblk output (for the failure message below)
+  ansible.builtin.command: "lsblk -dn -o NAME,SIZE,TYPE,TRAN,MOUNTPOINT"
+  register: _gluster_lsblk_all
+  changed_when: false
+  when: _gluster_candidates.stdout_lines | length == 0
 
 - name: Fail if no USB drive of expected size found
   ansible.builtin.fail:
     msg: |
       Could not find a USB disk of at least 500 GB on {{ inventory_hostname }}.
       lsblk output was:
-      {{ _gluster_candidates.stdout }}
+      {{ _gluster_lsblk_all.stdout }}
   when: _gluster_candidates.stdout_lines | length == 0
 
 - name: Pick the first matching USB drive as our brick device
