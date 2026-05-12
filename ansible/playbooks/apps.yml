@@ -1,0 +1,67 @@
+---
+# Deploy in-cluster apps.
+# Each app lives in a top-level apps/<name>/ directory and is described by
+# Kubernetes manifests. This playbook:
+#   1. Creates the host-side data directory on the GlusterFS volume so the
+#      hostPath PV can mount cleanly the first time.
+#   2. Runs `kubectl apply -f` for every app folder.
+#
+# To add an app:
+#   * Drop manifests in apps/<name>/  (one or more *.yaml files)
+#   * Register it in the cluster_apps list below.
+
+- name: Provision app data directories on GlusterFS
+  hosts: cluster
+  gather_facts: false
+  become: true
+  tags: [apps]
+  vars:
+    cluster_apps:
+      - openwebui
+  tasks:
+    - name: Ensure /mnt/storage/apps/<app> directory exists
+      ansible.builtin.file:
+        path: "{{ gluster_mount_point }}/apps/{{ item }}"
+        state: directory
+        mode: "0775"
+      loop: "{{ cluster_apps }}"
+      run_once: true
+      delegate_to: "{{ groups['cluster'][0] }}"
+
+- name: Apply Kubernetes manifests for cluster apps
+  hosts: supervisor
+  gather_facts: false
+  tags: [apps]
+  vars:
+    cluster_apps:
+      - openwebui
+  tasks:
+    - name: Confirm kubeconfig is present
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/.kube/config"
+      register: _kubeconfig
+      failed_when: not _kubeconfig.stat.exists
+
+    - name: Apply manifests for each app
+      ansible.builtin.command: >-
+        kubectl --kubeconfig /home/{{ ansible_user }}/.kube/config
+        apply -f {{ project_root }}/apps/{{ item }}/
+      register: _kubectl
+      changed_when: >-
+        'configured' in _kubectl.stdout
+        or 'created' in _kubectl.stdout
+      loop: "{{ cluster_apps }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Wait for each app's pods to be Ready
+      ansible.builtin.command: >-
+        kubectl --kubeconfig /home/{{ ansible_user }}/.kube/config
+        -n apps wait --for=condition=available --timeout=300s
+        deployment/{{ item }}
+      loop: "{{ cluster_apps }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _wait
+      changed_when: false
+      failed_when: false

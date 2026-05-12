@@ -22,30 +22,33 @@ safe and fast.
 
 ### Push a new website / app
 
-Apps are just Kubernetes manifests. Drop them under `apps/<name>/` (create the
-directory) and add a small play that runs `kubectl apply -f` for that
-directory. The supervisor's kubeconfig is at
-`/home/eachan/.kube/config`.
+Apps are just Kubernetes manifests. The convention is:
 
-A minimal example to deploy a website:
-
-```yaml
-# ansible/playbooks/apps.yml
-- name: Deploy user apps
-  hosts: supervisor
-  gather_facts: false
-  tags: [apps]
-  tasks:
-    - name: Apply manifests
-      ansible.builtin.command: >
-        kubectl --kubeconfig /home/{{ ansible_user }}/.kube/config
-        apply -f {{ project_root }}/apps/
-      register: out
-      changed_when: "'configured' in out.stdout or 'created' in out.stdout"
+```
+apps/<name>/manifest.yaml   # one or more YAML files; can be multi-doc
+apps/<name>/README.md       # optional human notes
 ```
 
-Add `- import_playbook: playbooks/apps.yml` to `site.yml`, drop your YAML
-under `apps/`, push, then `piclusterctl deploy --tags apps`.
+Then add `<name>` to the `cluster_apps` list in
+`ansible/playbooks/apps.yml`. `piclusterctl deploy --tags apps` will:
+
+1. Create `/mnt/storage/apps/<name>` on the GlusterFS volume (so any
+   `hostPath` PVs you reference work the first time).
+2. Run `kubectl apply -f apps/<name>/`.
+3. Wait up to 5 minutes for `deployment/<name>` to become `Available`.
+
+For apps that want a friendly title and description on the dashboard, add
+these annotations to the `Service`:
+
+```yaml
+metadata:
+  annotations:
+    picluster.dashboard/title: "My App"
+    picluster.dashboard/description: "Short blurb the UI will show"
+```
+
+The first example app is `apps/openwebui/` - see its README for layout
+conventions you can copy.
 
 ### Change Samba password
 

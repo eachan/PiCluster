@@ -12,3 +12,4 @@
 - import_playbook: playbooks/samba.yml
 - import_playbook: playbooks/ai.yml
 - import_playbook: playbooks/supervisor.yml
+- import_playbook: playbooks/apps.yml

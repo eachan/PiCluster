@@ -158,8 +158,10 @@ a:hover { text-decoration: underline; }
 }
 .app .nm { font-weight: 600; }
 .app .ns { color: var(--text-dim); font-size: 12px; }
+.app .desc { color: var(--text); font-size: 12px; opacity: .8; }
 .app .ep { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px; color: var(--accent); }
+  font-size: 12px; color: var(--accent); word-break: break-all; }
+.app a.ep:hover { text-decoration: underline; }
 .empty { color: var(--text-dim); font-style: italic; padding: 8px 0; }
 
 /* ---------- Storage ---------- */

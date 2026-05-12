@@ -94,15 +94,18 @@
       return;
     }
     els.apps.innerHTML = apps.map((a) => {
-      const port = a.node_port || a.port;
-      const endpoint = a.node_port
-        ? `http://supervisor:${a.node_port}`
-        : `${a.cluster_ip}:${a.port}`;
+      const title = a.title || a.name;
+      const endpoint = a.endpoint_url || "";
+      const desc = a.description ? `<div class="desc">${escape(a.description)}</div>` : "";
+      const ep = endpoint
+        ? `<a class="ep" href="${escape(endpoint)}" target="_blank" rel="noopener">${escape(endpoint)}</a>`
+        : `<span class="ep">${escape(a.cluster_ip || "")}${a.port ? ":" + a.port : ""}</span>`;
       return `
         <div class="app">
-          <div class="nm">${escape(a.name)}</div>
+          <div class="nm">${escape(title)}</div>
           <div class="ns">${escape(a.namespace)} · ${escape(a.type)}</div>
-          <div class="ep">${escape(endpoint)}</div>
+          ${desc}
+          ${ep}
         </div>`;
     }).join("");
   }

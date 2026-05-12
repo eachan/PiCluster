@@ -316,6 +316,7 @@ async def _collect_apps() -> list[dict[str, Any]]:
         return []
     apps: list[dict[str, Any]] = []
     system_namespaces = {"kube-system", "kube-public", "kube-node-lease"}
+    primary_host = CLUSTER_HOSTS[0] if CLUSTER_HOSTS else "node-1"
     for s in svcs.get("items", []):
         ns = s["metadata"]["namespace"]
         if ns in system_namespaces:
@@ -328,13 +329,25 @@ async def _collect_apps() -> list[dict[str, Any]]:
         ports = spec.get("ports", []) or []
         port = ports[0].get("port") if ports else None
         node_port = ports[0].get("nodePort") if ports else None
+        annotations = s.get("metadata", {}).get("annotations", {}) or {}
+        title = annotations.get("picluster.dashboard/title") or s["metadata"]["name"]
+        description = annotations.get("picluster.dashboard/description") or ""
+        if node_port:
+            endpoint_url = f"http://{primary_host}:{node_port}"
+        elif spec.get("clusterIP") and port:
+            endpoint_url = f"http://{spec['clusterIP']}:{port}"
+        else:
+            endpoint_url = ""
         apps.append({
             "namespace": ns,
             "name": s["metadata"]["name"],
+            "title": title,
+            "description": description,
             "type": spec.get("type"),
             "cluster_ip": spec.get("clusterIP"),
             "port": port,
             "node_port": node_port,
+            "endpoint_url": endpoint_url,
         })
     return apps
 
