@@ -84,8 +84,14 @@
         workgroup = {{ samba_workgroup }}
         server string = PiCluster Storage (%h)
         netbios name = picluster
+        server role = standalone server
         security = user
-        map to guest = bad user
+        # Force authentication - do NOT silently map bad logins to guest, and
+        # do not respond to anonymous probes. Windows will see this and prompt
+        # for credentials cleanly instead of trying (and failing on encryption)
+        # to use guest access.
+        map to guest = never
+        restrict anonymous = 2
         clustering = yes
         ctdbd socket = /var/run/ctdb/ctdbd.socket
         passdb backend = tdbsam
@@ -94,7 +100,9 @@
         logging = file
         panic action = /usr/share/samba/panic-action %d
         server min protocol = SMB2
-        smb encrypt = desired
+        # 'auto' = negotiate per client; 'desired' breaks guest-probe replies
+        # so Windows shows "Encryption is not supported for guest access".
+        smb encrypt = auto
         # gluster integration via fuse mount - good throughput on small files
         kernel share modes = no
         kernel oplocks = no
