@@ -61,6 +61,34 @@
     - { port: "2379:2380", proto: tcp } # etcd
   ignore_errors: true
 
+# K3s pods talk to each other and to the API service (10.43.0.1) through
+# the FORWARD chain when the chosen endpoint is on a remote node. UFW's
+# default forward policy is DROP, which silently breaks all pod -> service
+# traffic that doesn't happen to land locally. Two corrections:
+#   1. Switch UFW's default forward policy to ACCEPT (safe here - cluster
+#      nodes aren't acting as gateway routers for anything else).
+#   2. Explicitly allow traffic originating from the pod and service CIDRs.
+- name: UFW - default forward policy ACCEPT (required by K3s overlay)
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_FORWARD_POLICY='
+    line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+  register: _ufw_forward_policy
+
+- name: UFW - reload to pick up forward policy change
+  ansible.builtin.command: ufw reload
+  when: _ufw_forward_policy.changed
+  changed_when: true
+
+- name: UFW - allow pod and service CIDRs (K3s overlay)
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+  loop:
+    - "10.42.0.0/16"   # K3s pod CIDR
+    - "10.43.0.0/16"   # K3s service CIDR
+  ignore_errors: true
+
 # ---------------------------------------------------------------------------
 # Install k3s
 # ---------------------------------------------------------------------------
