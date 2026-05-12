@@ -8,32 +8,17 @@
       - python3-pip
     state: present
 
-- name: Ensure dashboard directory exists
+# The dashboard source already lives in {{ project_root }}/dashboard
+# because piclusterctl just did `git reset --hard origin/main` against the
+# repo at {{ project_root }}. No copy or rsync is needed - we just make
+# sure the top-level dir has the right owner.
+- name: Ensure dashboard directory ownership
   ansible.builtin.file:
     path: "{{ project_root }}/dashboard"
     state: directory
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
     mode: "0755"
-
-- name: Sync dashboard source files
-  ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../dashboard/"
-    dest: "{{ project_root }}/dashboard/"
-    delete: true
-    rsync_opts: ["--exclude=.venv", "--exclude=__pycache__"]
-  delegate_to: localhost
-  become: false
-  failed_when: false
-
-- name: Fallback - copy dashboard source files (when synchronize unavailable)
-  ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../../dashboard/"
-    dest: "{{ project_root }}/dashboard/"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: "0644"
-    directory_mode: "0755"
 
 - name: Create dashboard virtualenv and install requirements
   ansible.builtin.pip:
