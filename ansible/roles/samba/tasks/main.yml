@@ -11,16 +11,6 @@
     state: present
     update_cache: true
 
-- name: Stop services while we reconfigure
-  ansible.builtin.systemd:
-    name: "{{ item }}"
-    state: stopped
-  loop:
-    - smbd
-    - nmbd
-    - ctdb
-  failed_when: false
-
 - name: Ensure Samba share directory exists on the Gluster volume
   ansible.builtin.file:
     path: "{{ samba_share_path }}"
@@ -83,23 +73,6 @@
 # ---------------------------------------------------------------------------
 # Samba configuration
 # ---------------------------------------------------------------------------
-- name: Ensure Samba user exists at OS level
-  ansible.builtin.user:
-    name: "{{ samba_user }}"
-    state: present
-    shell: /usr/sbin/nologin
-    create_home: false
-  when: samba_user != ansible_user   # the ansible_user already exists
-
-- name: Set Samba password for {{ samba_user }}
-  ansible.builtin.shell: |
-    (echo "{{ samba_password }}"; echo "{{ samba_password }}") | smbpasswd -s -a {{ samba_user }}
-  args:
-    executable: /bin/bash
-  register: _smbpasswd
-  changed_when: "'Added user' in _smbpasswd.stdout or 'New SMB password' in _smbpasswd.stdout"
-  no_log: true
-
 - name: Write smb.conf
   ansible.builtin.copy:
     dest: /etc/samba/smb.conf
@@ -143,6 +116,12 @@
 
 # Make sure smbd starts AFTER CTDB (so CTDB's tdb sockets are ready) and
 # is restarted whenever CTDB restarts.
+- name: smbd systemd drop-in dir
+  ansible.builtin.file:
+    path: /etc/systemd/system/smbd.service.d
+    state: directory
+    mode: "0755"
+
 - name: smbd systemd drop-in - order after ctdb
   ansible.builtin.copy:
     dest: /etc/systemd/system/smbd.service.d/ctdb-order.conf
@@ -155,9 +134,17 @@
       Requires=ctdb.service
   notify: restart samba
 
-- name: Reload systemd to pick up smbd drop-in
+- name: Reload systemd to pick up drop-ins
   ansible.builtin.systemd:
     daemon_reload: true
+
+# ---------------------------------------------------------------------------
+# Bring CTDB up FIRST. Once CTDB is healthy, the Samba tdb databases that
+# smbpasswd writes to become reachable (clustering = yes in smb.conf routes
+# them through CTDB).
+# ---------------------------------------------------------------------------
+- name: Flush handlers so any ctdb config changes restart it now
+  ansible.builtin.meta: flush_handlers
 
 - name: Enable + start CTDB
   ansible.builtin.systemd:
@@ -165,11 +152,11 @@
     enabled: true
     state: started
 
-- name: Wait for CTDB to be healthy
+- name: Wait for CTDB to be healthy (Recovery mode:NORMAL)
   ansible.builtin.shell: |
     set -e
     for i in $(seq 1 30); do
-      if sudo ctdb status 2>/dev/null | grep -q 'Recovery mode:NORMAL'; then
+      if ctdb status 2>/dev/null | grep -q 'Recovery mode:NORMAL'; then
         exit 0
       fi
       sleep 2
@@ -177,16 +164,57 @@
     exit 1
   args:
     executable: /bin/bash
+  become: true
+  changed_when: false
+  register: _ctdb_wait
+  failed_when: _ctdb_wait.rc != 0
+
+# ---------------------------------------------------------------------------
+# Now CTDB is up, we can write to Samba's clustered passwd database.
+# ---------------------------------------------------------------------------
+- name: Ensure Samba user exists at OS level
+  ansible.builtin.user:
+    name: "{{ samba_user }}"
+    state: present
+    shell: /usr/sbin/nologin
+    create_home: false
+  when: samba_user != ansible_user
+
+- name: Check if Samba user already exists in passdb
+  ansible.builtin.command: "pdbedit -L -u {{ samba_user }}"
+  register: _pdb_check
   changed_when: false
   failed_when: false
+  run_once: true
+  delegate_to: "{{ groups['cluster'][0] }}"
 
-- name: Enable + start smbd / nmbd (CTDB integration is via clustering=yes
-       in smb.conf, not via CTDB event scripts)
+- name: Add Samba user to passdb (run once, on bootstrap node)
+  ansible.builtin.shell: |
+    printf '%s\n%s\n' '{{ samba_password }}' '{{ samba_password }}' \
+      | smbpasswd -s -a '{{ samba_user }}'
+  args:
+    executable: /bin/bash
+  when: _pdb_check.rc != 0 or _pdb_check.stdout == ""
+  run_once: true
+  delegate_to: "{{ groups['cluster'][0] }}"
+  register: _smbpasswd_add
+  changed_when: "'Added user' in (_smbpasswd_add.stdout | default(''))"
+
+- name: Ensure Samba password is set to the configured value
+  ansible.builtin.shell: |
+    printf '%s\n%s\n' '{{ samba_password }}' '{{ samba_password }}' \
+      | smbpasswd -s '{{ samba_user }}'
+  args:
+    executable: /bin/bash
+  run_once: true
+  delegate_to: "{{ groups['cluster'][0] }}"
+  changed_when: false
+
+- name: Enable + start smbd / nmbd
   ansible.builtin.systemd:
     name: "{{ item }}"
     enabled: true
     state: started
-    daemon_reload: true
   loop:
     - smbd
     - nmbd
