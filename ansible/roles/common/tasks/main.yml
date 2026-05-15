@@ -127,6 +127,71 @@
         state: stopped
       ignore_errors: true
 
+    # `ufw disable` does NOT undo the iptables FORWARD policy DROP that UFW
+    # installs at the kernel level, nor does it flush leftover ufw-* chains.
+    # K3s only repairs its FORWARD rules at its own startup, so if K3s was
+    # already running while UFW was active its KUBE-FORWARD jumps sit below
+    # a DROP default and pod -> ClusterIP traffic (e.g. 10.43.0.1:443) gets
+    # silently dropped. We:
+    #   1. force FORWARD policy back to ACCEPT (legacy + nft backends),
+    #   2. flush leftover ufw-* chains in both backends,
+    #   3. bounce K3s so it reinstalls its KUBE-* iptables jumps cleanly,
+    #   4. wait for the apiserver to come back before moving on.
+    #
+    # `throttle: 1` means only one cluster node performs this at a time, so
+    # the embedded etcd never loses quorum during the rolling fix.
+    - name: Reset iptables, flush ufw-* chains, and bounce K3s if needed
+      ansible.builtin.shell: |
+        set -e
+        changed=0
+        for ipt in iptables-legacy iptables-nft; do
+          command -v $ipt >/dev/null 2>&1 || continue
+          for chain in FORWARD INPUT OUTPUT; do
+            if $ipt -S $chain 2>/dev/null | head -n1 | grep -q "P $chain DROP"; then
+              $ipt -P $chain ACCEPT
+              changed=1
+            fi
+          done
+          for chain in FORWARD INPUT OUTPUT; do
+            while $ipt -S $chain 2>/dev/null | grep -q '\-j ufw'; do
+              rule=$($ipt -S $chain | grep -m1 '\-j ufw' | sed 's/^-A /-D /')
+              # shellcheck disable=SC2086
+              $ipt $rule || break
+              changed=1
+            done
+          done
+          for c in $($ipt -S 2>/dev/null | awk '/^-N ufw-/ {print $2}'); do
+            $ipt -F "$c" 2>/dev/null || true
+            $ipt -X "$c" 2>/dev/null || true
+            changed=1
+          done
+        done
+        if [ "$changed" = "0" ]; then
+          echo NOCHANGE
+          exit 0
+        fi
+        if systemctl is-active --quiet k3s.service; then
+          systemctl restart k3s.service
+          # Wait for the local apiserver to be ready again. The k3s server
+          # listens on 6443 only after etcd has rejoined and the apiserver
+          # answers, so this is a real readiness check, not just a port probe.
+          for i in $(seq 1 60); do
+            if curl -ks --max-time 2 https://127.0.0.1:6443/readyz >/dev/null 2>&1; then
+              echo CHANGED
+              exit 0
+            fi
+            sleep 2
+          done
+          echo CHANGED_BUT_UNHEALTHY
+          exit 1
+        fi
+        echo CHANGED
+      args:
+        executable: /bin/bash
+      register: _ipt_reset
+      changed_when: "'CHANGED' in (_ipt_reset.stdout | default(''))"
+      throttle: 1
+
 # node_exporter on every host so Prometheus on the supervisor can scrape it.
 - name: Install node_exporter
   ansible.builtin.include_tasks: node_exporter.yml
