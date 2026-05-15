@@ -215,13 +215,32 @@
     state: directory
     mode: "0755"
 
-- name: Mount Gluster volume on each node
+# NOTE: we use `state: present` (writes fstab only) plus an explicit mount,
+# rather than `state: mounted` (which would compare /proc/mounts to fstab
+# and umount+remount on every run when they differ). The live kernel
+# options for a GlusterFS FUSE mount include runtime options that the
+# fstab line doesn't carry, so `state: mounted` would attempt an unmount
+# every deploy. That umount fails the moment something else on the node
+# is holding the path open - Samba/CTDB on /mnt/storage/ctdb, app pods
+# on /mnt/storage/apps - which is exactly what happened on node-1.
+- name: Ensure Gluster volume is configured in fstab
   ansible.posix.mount:
     path: "{{ gluster_mount_point }}"
     src: "{{ inventory_hostname }}:/{{ gluster_volume_name }}"
     fstype: glusterfs
     opts: "defaults,_netdev,backupvolfile-server={{ groups['cluster'] | difference([inventory_hostname]) | join(':') }}"
-    state: mounted
+    state: present
+
+- name: Check whether the Gluster volume is already mounted
+  ansible.builtin.command: "mountpoint -q {{ gluster_mount_point }}"
+  register: _gluster_mounted
+  changed_when: false
+  failed_when: false
+
+- name: Mount Gluster volume (only when not already mounted)
+  ansible.builtin.command: "mount {{ gluster_mount_point }}"
+  when: _gluster_mounted.rc != 0
+  changed_when: true
 
 - name: Ensure share + apps directories exist on the volume
   ansible.builtin.file:
